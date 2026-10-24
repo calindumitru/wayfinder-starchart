@@ -284,7 +284,10 @@ mod tests {
         let mut r = req(Kind::Work, Some(2), "Start with blue.\nKeep it short.");
         r.worktree = true;
         let l = plan(&r, Some(&map())).unwrap();
-        assert_eq!(l.branch.as_deref(), Some("wayfinder/2-which-colour-should-the-button-be"));
+        assert_eq!(
+            l.branch.as_deref(),
+            Some("wayfinder/2-which-colour-should-the-button-be")
+        );
         assert!(
             l.message
                 .ends_with("note from the map:\n\n> Start with blue.\n> Keep it short.\n")
