@@ -1,5 +1,5 @@
 [package]
-name = "wayfinder-console"
+name = "wayfinder-starchart"
 version = "0.1.0"
 edition = "2024"
 description = "A star-map of wayfinder maps kept as GitHub issues, with buttons that start T3 Code sessions"

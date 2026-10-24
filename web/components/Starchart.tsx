@@ -26,7 +26,7 @@ function writeUrl(repo: string, map: number | null) {
   if (location.search !== next) history.pushState(null, "", next);
 }
 
-export function Console() {
+export function Starchart() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [repo, setRepo] = useState<string | null>(null);
   const [mapNum, setMapNum] = useState<number | null>(null);
@@ -123,7 +123,7 @@ export function Console() {
         onFog={(i) => setSelection({ kind: "fog", index: i })}
       />
 
-      {fatal && <div className="fatal">Can&apos;t reach the console server: {fatal}</div>}
+      {fatal && <div className="fatal">Can&apos;t reach the starchart server: {fatal}</div>}
 
       {mapNum != null && (
         <>

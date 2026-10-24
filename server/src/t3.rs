@@ -1,4 +1,4 @@
-//! Starts and lists T3 Code threads through T3's own `t3` CLI. The console never sends a prompt
+//! Starts and lists T3 Code threads through T3's own `t3` CLI. Starchart never sends a prompt
 //! it didn't build: a launch names an action and a ticket on a loaded map, and the prompt is a
 //! fixed template around them (the user's note, when there is one, is quoted as theirs).
 
@@ -83,7 +83,7 @@ fn with_note(mut message: String, note: &str) -> String {
 }
 
 /// The thread to start for a request, checked against the map it names. A ticket's thread is
-/// titled `#<n> <title>` so the console can find it again in `t3 thread list`.
+/// titled `#<n> <title>` so starchart can find it again in `t3 thread list`.
 pub fn plan(req: &LaunchRequest, map: Option<&Map>) -> Result<Launch> {
     let note = req.note.trim();
     if note.chars().count() > MAX_NOTE {

@@ -1,4 +1,4 @@
-//! wayfinder-console: a star-map of wayfinder maps kept as GitHub issues, with buttons that
+//! wayfinder-starchart: a star-map of wayfinder maps kept as GitHub issues, with buttons that
 //! start T3 Code sessions on a ticket.
 
 mod github;
@@ -80,7 +80,7 @@ async fn main() -> Result<()> {
         },
     ));
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", args.port)).await?;
-    println!("wayfinder-console: http://127.0.0.1:{}", args.port);
+    println!("wayfinder-starchart: http://127.0.0.1:{}", args.port);
     axum::serve(listener, http::router(app)).await?;
     Ok(())
 }

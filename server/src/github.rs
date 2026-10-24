@@ -1,4 +1,4 @@
-//! Reads maps from GitHub through `gh api graphql`, so the console holds no token of its own: it
+//! Reads maps from GitHub through `gh api graphql`, so starchart holds no token of its own: it
 //! runs as whoever `gh` is logged in as. One query returns a whole map, its tickets, their
 //! blockers (with the state of blockers off the map) and their comments.
 

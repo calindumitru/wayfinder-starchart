@@ -1,4 +1,4 @@
-//! The console's HTTP API and the embedded web app.
+//! Starchart's HTTP API and the embedded web app.
 //!
 //! The server binds to loopback, but any web page the user opens can still send requests to
 //! loopback, and a launch starts an agent on this machine. So every request must carry an
@@ -127,11 +127,11 @@ async fn guard(State(app): State<Shared>, req: Request, next: Next) -> Response 
     }
     if req.method() != Method::GET && req.method() != Method::HEAD {
         let token = headers
-            .get("x-console-token")
+            .get("x-starchart-token")
             .and_then(|h| h.to_str().ok())
             .unwrap_or_default();
         if token != app.token {
-            return ApiError(StatusCode::FORBIDDEN, "missing or wrong console token".into()).into_response();
+            return ApiError(StatusCode::FORBIDDEN, "missing or wrong starchart token".into()).into_response();
         }
         if let Some(origin) = headers.get(header::ORIGIN).and_then(|h| h.to_str().ok())
             && !app.allowed_hosts.iter().any(|a| a == host_of_origin(origin))
@@ -256,7 +256,7 @@ mod tests {
         let mut b = axum::http::Request::post("/api/launch")
             .header("host", "127.0.0.1:7788")
             .header("content-type", "application/json")
-            .header("x-console-token", token);
+            .header("x-starchart-token", token);
         if let Some(o) = origin {
             b = b.header("origin", o);
         }

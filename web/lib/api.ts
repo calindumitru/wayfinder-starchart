@@ -29,6 +29,6 @@ export const threads = (repo: string) => call<Thread[]>(`/api/threads?${q(repo)}
 export const launch = (req: LaunchRequest) =>
   call<{ title: string; branch: string | null }>("/api/launch", {
     method: "POST",
-    headers: { "content-type": "application/json", "x-console-token": token },
+    headers: { "content-type": "application/json", "x-starchart-token": token },
     body: JSON.stringify(req),
   });

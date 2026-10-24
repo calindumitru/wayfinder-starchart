@@ -1,4 +1,4 @@
-# wayfinder-console
+# wayfinder-starchart
 
 A star-map of [wayfinder](https://github.com/mattpocock/skills) maps kept as GitHub issues, with
 buttons that start [T3 Code](https://t3.codes) sessions on them. Click a ticket, press **Grill me
@@ -14,7 +14,7 @@ the map straight from GitHub and can act on it.
 
 - **Reads maps from GitHub.** A map is an issue labelled `wayfinder:map`; its sub-issues are the
   tickets, typed by a `wayfinder:<type>` label and wired with GitHub's native issue dependencies.
-  One GraphQL query (through `gh`, so the console holds no token) returns a whole map.
+  One GraphQL query (through `gh`, so starchart holds no token) returns a whole map.
 - **Derives each ticket's status.** Closed as completed is *resolved*, closed as not planned is
   *out of scope*. An open ticket whose assignee has commented on it is *claimed*. An assignee who
   never commented left an abandoned claim, so the ticket counts as free. A free ticket is on the
@@ -40,7 +40,7 @@ You need `gh` (logged in) and T3 Code (its `t3` CLI, at `~/.t3/bin/t3` or on `PA
 ```sh
 (cd web && npm ci && npm run build)   # the static web app, embedded into the binary
 cargo build --release
-./target/release/wayfinder-console --project owner/repo=/path/to/checkout
+./target/release/wayfinder-starchart --project owner/repo=/path/to/checkout
 ```
 
 Then open http://127.0.0.1:7788. Repeat `--project` for more repositories; the path is the

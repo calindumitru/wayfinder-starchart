@@ -1,5 +1,5 @@
-import { Console } from "@/components/Console";
+import { Starchart } from "@/components/Starchart";
 
 export default function Page() {
-  return <Console />;
+  return <Starchart />;
 }

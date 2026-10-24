@@ -926,7 +926,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "wayfinder-console"
+name = "wayfinder-starchart"
 version = "0.1.0"
 dependencies = [
  "anyhow",
