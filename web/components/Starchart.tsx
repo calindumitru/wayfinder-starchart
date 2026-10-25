@@ -3,10 +3,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as api from "@/lib/api";
 import type { Hover } from "@/lib/engine";
-import type { LaunchRequest, MapSummary, Project, Status, Thread, Ticket, WayMap } from "@/lib/types";
+import type { BuildSlice, LaunchRequest, MapCheck, MapSpec, MapSummary, Project, SliceState, Status, Thread, Ticket, WayMap } from "@/lib/types";
 import * as I from "./Icons";
 import { HoverTip } from "./HoverTip";
-import { Mark, Panel, type Selection } from "./Panel";
+import { Mark, Panel, SLICE_STATE, SliceMark, type Selection } from "./Panel";
+import { SpecReader } from "./SpecReader";
 import { StarMap } from "./StarMap";
 
 type Toast = { id: number; text: string; error?: boolean };
@@ -46,7 +47,9 @@ export function Starchart() {
   const [repo, setRepo] = useState<string | null>(null);
   const [mapNum, setMapNum] = useState<number | null>(null);
   const [summaries, setSummaries] = useState<MapSummary[] | null>(null);
-  const [map, setMap] = useState<WayMap | null>(null);
+  // The map as read, and the slices of the tickets opened so far: a map carries only its own.
+  const [raw, setMap] = useState<WayMap | null>(null);
+  const [kids, setKids] = useState<Record<number, BuildSlice[]>>({});
   const [threads, setThreads] = useState<Thread[]>([]);
   const [selection, setSelection] = useState<Selection | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
@@ -61,6 +64,11 @@ export function Starchart() {
   const [wide, setWide] = useState(false);
   const [tip, setTip] = useState<HTMLDivElement | null>(null);
   const [t3Env, setT3Env] = useState<string | null>(null);
+  // Reading the spec rather than looking at the stars. Null until the map loads: a closed map
+  // opens as its spec, an open one as its stars.
+  const [reading, setReading] = useState<boolean | null>(null);
+  const [spec, setSpec] = useState<MapSpec | null>(null);
+  const [specError, setSpecError] = useState<string | null>(null);
 
   const toast = useCallback((text: string, error = false) => {
     const id = Date.now() + Math.random();
@@ -97,7 +105,7 @@ export function Starchart() {
     (fresh: boolean) => {
       if (!repo || mapNum == null) return Promise.resolve();
       return api.map(repo, mapNum, fresh).then(
-        (m) => { setMap(m); setLoadedAt(Date.now()); },
+        (m) => { setMap(m); setLoadedAt(Date.now()); setReading((r) => r ?? !m.open); },
         (e) => toast(e.message, true),
       );
     },
@@ -117,6 +125,26 @@ export function Starchart() {
     return () => { clearInterval(a); clearInterval(b); };
   }, [mapNum, loadMap, loadThreads]);
 
+  const map = useMemo(
+    () => raw && { ...raw, slices: [...raw.slices, ...Object.values(kids).flat()] },
+    [raw, kids],
+  );
+
+  // The ticket whose slices to read: the one open in the panel, or the parent of the open slice
+  // (known from its check when the slice isn't loaded yet). Read again with every map reload.
+  const parentOf = (n: number) =>
+    map?.slices.find((sl) => sl.num === n)?.parent ?? map?.checks.find((c) => c.slice === n)?.parent ?? null;
+  const want =
+    selection?.kind === "ticket" ? selection.num : selection?.kind === "slice" ? parentOf(selection.num) : null;
+  const wantSlices = want != null && raw?.tickets.find((t) => t.num === want)?.slices ? want : null;
+  useEffect(() => {
+    if (!repo || mapNum == null || wantSlices == null) return;
+    api.slices(repo, mapNum, wantSlices).then(
+      (list) => setKids((k) => ({ ...k, [wantSlices]: list })),
+      (e) => toast(e.message, true),
+    );
+  }, [repo, mapNum, wantSlices, loadedAt, toast]);
+
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 20000);
     return () => clearInterval(t);
@@ -126,11 +154,12 @@ export function Starchart() {
   const match = useMemo(() => {
     const q = query.trim().toLowerCase().replace(/^#/, "");
     if (!map || (!q && !only)) return null;
-    return new Set(
-      map.tickets
-        .filter((t) => (!only || t.status === only) && (!q || String(t.num).startsWith(q) || t.title.toLowerCase().includes(q)))
-        .map((t) => t.num),
-    );
+    const hit = (num: number, title: string) => !q || String(num).startsWith(q) || title.toLowerCase().includes(q);
+    return new Set([
+      ...map.tickets.filter((t) => (!only || t.status === only) && hit(t.num, t.title)).map((t) => t.num),
+      // A status filter is about decisions; slices only answer the search.
+      ...(only ? [] : map.slices.filter((sl) => hit(sl.num, sl.title)).map((sl) => sl.num)),
+    ]);
   }, [map, query, only]);
 
   // Each ticket's live T3 thread (the newest unsettled one), which its moon stands for.
@@ -164,12 +193,29 @@ export function Starchart() {
     [toast, loadThreads],
   );
 
+  const loadSpec = useCallback(
+    (fresh: boolean) => {
+      if (!repo || mapNum == null) return;
+      api.spec(repo, mapNum, fresh).then(setSpec, (e) => setSpecError(e.message));
+    },
+    [repo, mapNum],
+  );
+  useEffect(() => {
+    if (reading && !spec && !specError) loadSpec(false);
+  }, [reading, spec, specError, loadSpec]);
+
   const selectedNum = selection?.kind === "ticket" ? selection.num : null;
-  const openMap = (n: number | null) => { setSelection(null); setMap(null); setMapNum(n); setQuery(""); setOnly(null); };
+  const selectedSlice = selection?.kind === "slice" ? selection.num : null;
+  const openMap = (n: number | null) => {
+    setSelection(null); setMap(null); setKids({}); setMapNum(n); setQuery(""); setOnly(null);
+    setReading(null); setSpec(null); setSpecError(null);
+  };
   const refresh = () => {
     if (mapNum == null) { if (repo) { setSummaries(null); api.maps(repo).then(setSummaries, (e) => toast(e.message, true)); } return; }
     loadMap(true); loadThreads(); toast("Reloaded from GitHub");
+    if (reading) { setSpecError(null); loadSpec(true); }
   };
+  const stars = !reading;
   const next = map ? nextUp(map) : undefined;
 
   return (
@@ -178,6 +224,8 @@ export function Starchart() {
         map={mapNum != null ? map : null}
         threads={live}
         selected={selectedNum}
+        selectedSlice={selectedSlice}
+        onSlice={(n) => setSelection({ kind: "slice", num: n })}
         panelOpen={selection != null}
         panelWide={wide}
         match={match}
@@ -190,7 +238,7 @@ export function Starchart() {
         onHover={setHover}
       />
 
-      {map && mapNum != null && <HoverTip ref={setTip} map={map} hover={hover} live={liveThreads} canOpenThreads={!!t3Env} />}
+      {map && mapNum != null && stars && <HoverTip ref={setTip} map={map} hover={hover} live={liveThreads} canOpenThreads={!!t3Env} />}
 
       {fatal && <div className="fatal">Can&apos;t reach the starchart server: {fatal}</div>}
 
@@ -210,7 +258,7 @@ export function Starchart() {
             )}
           </nav>
           <div className="spacer" />
-          {mapNum != null && map && (
+          {mapNum != null && map && stars && (
             <SearchBox
               value={query}
               onChange={setQuery}
@@ -222,11 +270,21 @@ export function Starchart() {
         </header>
       )}
 
-      {map && mapNum != null && (
+      {map && mapNum != null && reading && repo && (
+        <SpecReader
+          repo={repo}
+          map={map}
+          spec={spec}
+          error={specError}
+          onOpenMap={(ticket) => { setReading(false); if (ticket != null) setSelection({ kind: "ticket", num: ticket }); }}
+        />
+      )}
+
+      {map && mapNum != null && stars && (
         <Legend map={map} live={live.size} only={only} onOnly={(s) => setOnly(only === s ? null : s)} />
       )}
 
-      {map && mapNum != null && repo && (
+      {map && mapNum != null && repo && stars && (
         <footer id="hud">
           <button
             className="primary next"
@@ -242,9 +300,11 @@ export function Starchart() {
             </button>
           )}
           <div className="spacer" />
+          <ChecksButton checks={map.checks} onSlice={(n) => setSelection({ kind: "slice", num: n })} />
           <ChartButton onChart={(idea) => launch({ repo, kind: "chart", note: idea })} />
           <ViewMenu
             onInfo={() => setSelection({ kind: "info" })}
+            onRead={() => { setSelection(null); setReading(true); }}
             onFit={() => { setSelection(null); setFitSignal((n) => n + 1); }}
             onMaps={() => openMap(null)}
           />
@@ -252,7 +312,7 @@ export function Starchart() {
         </footer>
       )}
 
-      {map && selection && repo && (
+      {map && selection && repo && stars && (
         <Panel
           repo={repo}
           map={map}
@@ -260,6 +320,7 @@ export function Starchart() {
           threads={threads}
           onClose={() => setSelection(null)}
           onSelect={(n) => setSelection({ kind: "ticket", num: n })}
+          onSelectSlice={(n) => setSelection({ kind: "slice", num: n })}
           onLaunch={launch}
           wide={wide}
           onWide={setWide}
@@ -324,11 +385,76 @@ function Legend({ map, live, only, onOnly }: { map: WayMap; live: number; only: 
           <span className="lc">{count[l.status]}</span>
         </button>
       ))}
+      {(map.slices.length > 0 || map.tickets.some((t) => t.slices)) && <SliceLegend map={map} />}
       <div className="lrow static"><Mark status="thread" /> <span className="ll">Active T3 thread</span><span className="lc">{live || ""}</span></div>
       <div className="lrow static"><Mark status="fog" /> <span className="ll">Open question</span><span className="lc">{map.fog.length || ""}</span></div>
       <div className="lbar" title={`${done}% resolved or ruled out`}><span style={{ width: `${done}%` }} /></div>
       <div className="lhint">drag to pan · scroll to zoom · click a star</div>
     </aside>
+  );
+}
+
+const SLICE_ORDER: SliceState[] = ["ready", "building", "blocked", "human", "built"];
+
+// The build half of the key: slices are squares, filled once built. A ticket's slices are only
+// counted until it's opened, so the states are counted only once every ticket's are loaded.
+function SliceLegend({ map }: { map: WayMap }) {
+  const loose = map.slices.filter((sl) => sl.parent == null);
+  const counted = map.tickets.reduce((a, t) => a + (t.slices?.total ?? 0), 0);
+  const total = loose.length + counted;
+  const closed = loose.filter((sl) => sl.state === "built" || sl.state === "dropped").length
+    + map.tickets.reduce((a, t) => a + (t.slices?.closed ?? 0), 0);
+  const all = map.slices.length >= total;
+  const n = (st: SliceState) => map.slices.filter((sl) => sl.state === st).length;
+  return (
+    <>
+      <div className="lsep">Build slices <span className="lsepc">{closed}/{total} closed</span></div>
+      {SLICE_ORDER.filter((st) => st !== "human" || n(st) > 0).map((st) => (
+        <div key={st} className="lrow static"><SliceMark state={st} /> <span className="ll">{SLICE_STATE[st]}</span><span className="lc">{all ? n(st) : ""}</span></div>
+      ))}
+      {!all && <div className="lhint">open a ticket to see its slices</div>}
+    </>
+  );
+}
+
+// The open agent and owner checks across the map's slices, in a tray: what's waiting on you,
+// and what an agent can check, each with its due line.
+function ChecksButton({ checks, onSlice }: { checks: MapCheck[]; onSlice: (n: number) => void }) {
+  const [open, setOpen] = useState(false);
+  const close = useCallback(() => setOpen(false), []);
+  const ref = useOutside(open, close);
+  const list = checks.filter((c) => c.open).sort((a, b) => (a.kind === b.kind ? a.num - b.num : a.kind === "owner" ? -1 : 1));
+  if (!list.length) return null;
+  const owner = list.filter((c) => c.kind === "owner").length, agent = list.length - owner;
+  return (
+    <div className="pop" ref={ref}>
+      <button className="tbtn big checksbtn" onClick={() => setOpen(!open)}>
+        {owner > 0 && <><span className="flag owner" /> {owner} owner check{owner === 1 ? "" : "s"}</>}
+        {owner > 0 && agent > 0 && <span className="sepdot">·</span>}
+        {agent > 0 && <><span className="flag agent" /> {agent} agent check{agent === 1 ? "" : "s"}</>}
+      </button>
+      {open && (
+        <div className="popover checkspop">
+          <div className="ptitle">Open checks</div>
+          {list.map((c) => (
+            <div key={c.num} className="checkitem">
+              <span className={`flag ${c.kind}`} />
+              <div>
+                <a href={c.url} target="_blank" rel="noreferrer"><b>#{c.num}</b> {c.title.replace(/^Check:\s*/i, "")}</a>
+                <div className="cmeta">
+                  {c.kind === "owner" ? "You" : "An agent"} · {c.due ? `due ${c.due}` : "no due line"}
+                  {c.slice != null && (
+                    <>
+                      {" "}· from <button className="link" onClick={() => { setOpen(false); onSlice(c.slice!); }}>#{c.slice}</button>
+                    </>
+                  )}
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -365,7 +491,7 @@ function ChartButton({ onChart }: { onChart: (idea: string) => Promise<boolean> 
   );
 }
 
-function ViewMenu({ onInfo, onFit, onMaps }: { onInfo: () => void; onFit: () => void; onMaps: () => void }) {
+function ViewMenu({ onInfo, onRead, onFit, onMaps }: { onInfo: () => void; onRead: () => void; onFit: () => void; onMaps: () => void }) {
   const [open, setOpen] = useState(false);
   const close = useCallback(() => setOpen(false), []);
   const ref = useOutside(open, close);
@@ -375,6 +501,7 @@ function ViewMenu({ onInfo, onFit, onMaps }: { onInfo: () => void; onFit: () => 
       <button className="tbtn big" onClick={() => setOpen(!open)}><I.List size={18} /> View <I.Chevron size={15} /></button>
       {open && (
         <div className="popover menu">
+          {item("Read the spec", onRead)}
           {item("Map details", onInfo)}
           {item("Fit to screen", onFit)}
           {item("All maps", onMaps)}

@@ -1,4 +1,4 @@
-import type { LaunchRequest, MapSummary, Project, Thread, WayMap } from "./types";
+import type { BuildSlice, LaunchRequest, MapSpec, MapSummary, Project, Thread, WayMap } from "./types";
 
 // Writes carry the per-run token the server hands out at /api/session; another origin can't
 // read it, so it can't start a session.
@@ -25,6 +25,13 @@ export const maps = (repo: string) => call<MapSummary[]>(`/api/maps?${q(repo)}`)
 
 export const map = (repo: string, num: number, fresh = false) =>
   call<WayMap>(`/api/maps/${num}?${q(repo)}${fresh ? "&fresh=1" : ""}`);
+
+// A ticket's build slices; a map carries only their count.
+export const slices = (repo: string, num: number, ticket: number, fresh = false) =>
+  call<BuildSlice[]>(`/api/maps/${num}/tickets/${ticket}/slices?${q(repo)}${fresh ? "&fresh=1" : ""}`);
+
+export const spec = (repo: string, num: number, fresh = false) =>
+  call<MapSpec>(`/api/maps/${num}/spec?${q(repo)}${fresh ? "&fresh=1" : ""}`);
 
 export const threads = (repo: string) => call<Thread[]>(`/api/threads?${q(repo)}`);
 

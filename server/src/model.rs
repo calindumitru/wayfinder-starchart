@@ -5,6 +5,18 @@
 //! whose assignee has commented on it is claimed, and any other open ticket is on the frontier
 //! when every blocker is closed (blockers outside the map count too) and blocked otherwise. An
 //! assignee who never commented left an abandoned claim: the ticket is free, flagged `staleClaim`.
+//!
+//! The build hangs off the map too. A ticket's own sub-issues are its build slices (a fold-in's,
+//! usually), and a ticket on the map that carries a build label (`ready-for-agent`,
+//! `ready-for-human`, `size:*`) instead of a `wayfinder:` type is a slice with no parent. A
+//! slice's state is derived the same way: closed is built (dropped when not planned), and an
+//! open one needs a human, is blocked, is being built (claimed, or a PR names it) or is ready.
+//! The agent and owner checks on a slice are the `check:` issues written from it ("From slice
+//! #613 …").
+//!
+//! A map carries only what its overview needs: how many slices each ticket has and how many are
+//! closed, and the slices on the map itself. A ticket's slices are read when it's opened
+//! (`slices_of`), because GitHub limits how often sub-issues and dependencies can be read.
 
 use regex::Regex;
 use serde::Serialize;
@@ -24,6 +36,20 @@ pub struct RawIssue {
     pub labels: Vec<String>,
     pub blocked_by: Vec<RawRef>,
     pub comments: Vec<RawComment>,
+    /// How many sub-issues (build slices) it has, and how many of them are closed.
+    pub sub_total: u32,
+    pub sub_closed: u32,
+    /// PRs that reference this one.
+    pub xrefs: Vec<RawPr>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RawPr {
+    pub number: u32,
+    pub url: String,
+    pub open: bool,
+    pub merged: bool,
+    pub body: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -76,6 +102,15 @@ pub struct Ticket {
     /// Blockers that aren't tickets on this map (a slice, another map's ticket).
     pub outside_blockers: Vec<OutsideBlocker>,
     pub rank: u32,
+    /// Its build slices, counted; `slices_of` reads them.
+    pub slices: Option<SliceCount>,
+}
+
+#[derive(Serialize, Clone, Copy, Debug, PartialEq)]
+pub struct SliceCount {
+    pub total: u32,
+    /// Closed, as built or dropped.
+    pub closed: u32,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -111,6 +146,64 @@ pub struct Counts {
     pub blocked: usize,
 }
 
+#[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum SliceState {
+    Ready,
+    Blocked,
+    Building,
+    /// Labelled `ready-for-human`: a person has to do it, or do something first.
+    Human,
+    Built,
+    Dropped,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct PrRef {
+    pub num: u32,
+    pub url: String,
+    pub merged: bool,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Check {
+    pub num: u32,
+    pub title: String,
+    pub url: String,
+    /// `owner` or `agent`.
+    pub kind: String,
+    pub open: bool,
+    /// The check's `**Due:**` line, as written: a date, or a condition like "when #829 is done".
+    pub due: Option<String>,
+    /// The slice it was written from.
+    pub slice: Option<u32>,
+    /// That slice's parent: a map ticket, or the map itself.
+    pub parent: Option<u32>,
+}
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct Slice {
+    pub num: u32,
+    pub title: String,
+    pub url: String,
+    pub body: String,
+    /// The map ticket it's a sub-issue of; none for a slice that sits on the map itself.
+    pub parent: Option<u32>,
+    pub state: SliceState,
+    /// From `size:xs` … `size:l`.
+    pub size: Option<String>,
+    pub escalate: bool,
+    pub assignee: Option<String>,
+    pub blockers: Vec<OutsideBlocker>,
+    /// The PR building it: an open one naming it, or for a built slice the merged one.
+    pub pr: Option<PrRef>,
+    /// A merged PR already names this open slice: it may have shipped, so check before building.
+    pub shipped: Option<PrRef>,
+    pub checks: Vec<Check>,
+}
+
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct Map {
@@ -124,19 +217,153 @@ pub struct Map {
     pub tickets: Vec<Ticket>,
     pub edges: Vec<Edge>,
     pub counts: Counts,
+    /// The slices on the map itself; a ticket's are read on their own.
+    pub slices: Vec<Slice>,
+    /// The open checks written from this map's slices, its tickets' included.
+    pub checks: Vec<Check>,
 }
 
 impl Map {
     pub fn ticket(&self, num: u32) -> Option<&Ticket> {
         self.tickets.iter().find(|t| t.num == num)
     }
+    pub fn slice(&self, num: u32) -> Option<&Slice> {
+        self.slices.iter().find(|s| s.num == num)
+    }
+}
+
+/// A ticket on the map that's a build slice rather than a decision.
+pub fn is_build(labels: &[String]) -> bool {
+    labels
+        .iter()
+        .any(|l| l == "ready-for-agent" || l == "ready-for-human" || l.starts_with("size:"))
+}
+
+static FENCE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?s)```.*?```").unwrap());
+static OWN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?:Slice|Part of|part of|Builds|Closes|Fixes|Resolves|Implements) #(\d+)").unwrap());
+static NUM: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"#(\d+)").unwrap());
+
+/// A PR names an issue as its own, the rule `scripts/frontier.sh` uses: "Slice #n", "Part of
+/// #n", "Closes #n" and the like, or #n as the first number on the body's first line. Fenced code
+/// and passing mentions don't count: a PR that says "unblocks #769" didn't build #769.
+pub fn names_as_own(body: &str, n: u32) -> bool {
+    let b = FENCE.replace_all(body, "");
+    let n = n.to_string();
+    OWN.captures_iter(&b).any(|c| c[1] == n)
+        || b.lines()
+            .find(|l| !l.trim().is_empty())
+            .and_then(|l| NUM.captures(l))
+            .is_some_and(|c| c[1] == n)
+}
+
+static DUE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?m)^\s*\*\*Due:?\*\*:?\s*(.+?)\s*$").unwrap());
+// "From slice #613", or "**Slice:** [its title](https://github.com/o/r/issues/377)".
+static FROM: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\bslice\b[^\n#]*?(?:#|/issues/)(\d+)").unwrap());
+// An issue reference, not a colour like `#111114`: after a space or bracket, before a non-word.
+static REF: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?:^|[\s(\[])#(\d{1,5})\b").unwrap());
+
+/// A check issue: its kind from its `check:` label, the slice it was written from (named after
+/// "slice", else the first issue it names) and its due line. None when it isn't a check.
+pub fn check(number: u32, title: &str, url: &str, open: bool, labels: &[String], body: &str) -> Option<Check> {
+    let kind = labels.iter().find_map(|l| l.strip_prefix("check:"))?;
+    let b = FENCE.replace_all(body, "");
+    Some(Check {
+        num: number,
+        title: title.to_string(),
+        url: url.to_string(),
+        kind: kind.to_string(),
+        open,
+        due: DUE.captures(body).map(|c| c[1].to_string()),
+        slice: FROM
+            .captures(&b)
+            .or_else(|| REF.captures(&b))
+            .and_then(|c| c[1].parse().ok()),
+        parent: None,
+    })
+}
+
+fn slice(t: &RawIssue, parent: Option<u32>, checks: &[Check]) -> Slice {
+    let commented = t.comments.iter().any(|c| t.assignees.contains(&c.author));
+    let prs: Vec<(u32, &String, bool, bool)> = t
+        .xrefs
+        .iter()
+        .filter(|p| names_as_own(&p.body, t.number))
+        .map(|p| (p.number, &p.url, p.open, p.merged))
+        .collect();
+    let pr_ref = |p: &(u32, &String, bool, bool)| PrRef {
+        num: p.0,
+        url: p.1.clone(),
+        merged: p.3,
+    };
+    let open_pr = prs.iter().filter(|p| p.2).max_by_key(|p| p.0).map(pr_ref);
+    let merged_pr = prs.iter().filter(|p| p.3).max_by_key(|p| p.0).map(pr_ref);
+    let state = if !t.open {
+        if t.not_planned {
+            SliceState::Dropped
+        } else {
+            SliceState::Built
+        }
+    } else if t.labels.iter().any(|l| l == "ready-for-human") {
+        SliceState::Human
+    } else if t.blocked_by.iter().any(|b| b.open) {
+        SliceState::Blocked
+    } else if open_pr.is_some() || (!t.assignees.is_empty() && commented) {
+        SliceState::Building
+    } else {
+        SliceState::Ready
+    };
+    let checks = checks.iter().filter(|c| c.slice == Some(t.number)).cloned().collect();
+    Slice {
+        num: t.number,
+        title: t.title.clone(),
+        url: t.url.clone(),
+        body: t.body.clone(),
+        parent,
+        size: t
+            .labels
+            .iter()
+            .find_map(|l| l.strip_prefix("size:"))
+            .map(str::to_string),
+        escalate: t.labels.iter().any(|l| l == "escalate"),
+        assignee: t.assignees.first().cloned(),
+        blockers: t
+            .blocked_by
+            .iter()
+            .map(|b| OutsideBlocker {
+                num: b.number,
+                title: b.title.clone(),
+                open: b.open,
+            })
+            .collect(),
+        pr: if t.open { open_pr } else { merged_pr.clone() },
+        shipped: if t.open { merged_pr } else { None },
+        checks,
+        state,
+    }
 }
 
 const TYPES: [&str; 4] = ["research", "prototype", "grilling", "task"];
 
-pub fn build(map: RawIssue, mut subs: Vec<RawIssue>) -> Map {
+/// A ticket's build slices, from its sub-issues.
+pub fn slices_of(parent: u32, subs: &[RawIssue], checks: &[Check]) -> Vec<Slice> {
+    let mut out: Vec<Slice> = subs.iter().map(|t| slice(t, Some(parent), checks)).collect();
+    out.sort_by_key(|s| s.num);
+    out
+}
+
+/// `checks` are the repo's check issues, each with its slice's parent filled in.
+pub fn build(map: RawIssue, mut subs: Vec<RawIssue>, checks: &[Check]) -> Map {
     subs.sort_by_key(|t| t.number);
+    // Build slices on the map itself aren't decisions: they go with the slices.
+    let (direct, subs): (Vec<RawIssue>, Vec<RawIssue>) = subs.into_iter().partition(|t| is_build(&t.labels));
+    let slices: Vec<Slice> = direct.iter().map(|t| slice(t, None, checks)).collect();
     let on_map: HashSet<u32> = subs.iter().map(|t| t.number).collect();
+    let map_checks = checks
+        .iter()
+        .filter(|c| c.open && c.parent.is_some_and(|p| p == map.number || on_map.contains(&p)))
+        .cloned()
+        .collect();
     let sections = sections(&map.body);
     let gists = gists(sections.get("decisions so far").map(String::as_str).unwrap_or(""));
     let fog = sections
@@ -213,6 +440,10 @@ pub fn build(map: RawIssue, mut subs: Vec<RawIssue>) -> Map {
                     })
                     .collect(),
                 rank: ranks[&t.number],
+                slices: (t.sub_total > 0).then_some(SliceCount {
+                    total: t.sub_total,
+                    closed: t.sub_closed,
+                }),
             }
         })
         .collect();
@@ -258,6 +489,8 @@ pub fn build(map: RawIssue, mut subs: Vec<RawIssue>) -> Map {
         tickets,
         edges,
         counts,
+        slices,
+        checks: map_checks,
     }
 }
 
@@ -431,8 +664,138 @@ mod tests {
             ..RawIssue::default()
         }
     }
+    fn build_(map: RawIssue, subs: Vec<RawIssue>) -> Map {
+        build(map, subs, &[])
+    }
     fn status(m: &Map, n: u32) -> Status {
         m.ticket(n).unwrap().status
+    }
+
+    fn slice_issue(number: u32, labels: &[&str]) -> RawIssue {
+        RawIssue {
+            number,
+            title: format!("Slice {number}"),
+            url: format!("https://github.com/o/r/issues/{number}"),
+            open: true,
+            labels: labels.iter().map(|l| l.to_string()).collect(),
+            ..RawIssue::default()
+        }
+    }
+
+    #[test]
+    fn a_pr_names_its_own_slice_not_the_ones_it_mentions() {
+        assert!(names_as_own("Slice #768, PR for the endpoint", 768));
+        assert!(names_as_own("\n#768: the endpoint\n\nunblocks #769", 768));
+        assert!(!names_as_own("\n#768: the endpoint\n\nunblocks #769", 769));
+        assert!(!names_as_own("Closes #7680", 768));
+        assert!(!names_as_own("Evidence:\n```\nSlice #616\n```\n", 616));
+    }
+
+    fn pr(number: u32, open: bool, body: &str) -> RawPr {
+        RawPr {
+            number,
+            url: format!("p{number}"),
+            open,
+            merged: !open,
+            body: body.into(),
+        }
+    }
+
+    #[test]
+    fn a_check_belongs_to_the_slice_it_was_written_from() {
+        let owner = ["check:owner".to_string()];
+        let c = check(
+            50,
+            "Check: it works",
+            "c50",
+            true,
+            &owner,
+            "From slice #15 (PR #42), after merge.\n\n**Due:** when #829 is done",
+        )
+        .unwrap();
+        assert_eq!((c.kind.as_str(), c.slice), ("owner", Some(15)));
+        assert_eq!(c.due.as_deref(), Some("when #829 is done"));
+        assert_eq!(
+            check(51, "x", "u", true, &owner, "Once #637 lands, for #15.")
+                .unwrap()
+                .slice,
+            Some(637)
+        );
+        assert!(check(52, "x", "u", true, &["bug".to_string()], "From slice #15").is_none());
+        assert_eq!(
+            check(53, "x", "u", true, &owner, "Background `#111114`, then (#15).")
+                .unwrap()
+                .slice,
+            Some(15)
+        );
+    }
+
+    #[test]
+    fn a_tickets_sub_issues_are_its_slices_and_build_labelled_tickets_are_slices_too() {
+        let ready = slice_issue(10, &["ready-for-agent", "size:m"]);
+        let mut built = slice_issue(11, &["ready-for-agent"]);
+        built.open = false;
+        built.xrefs = vec![pr(40, false, "Slice #11.")];
+        let mut blocked = slice_issue(12, &["ready-for-agent", "escalate"]);
+        blocked.blocked_by = vec![blocker(10, true)];
+        let mut building = slice_issue(13, &["ready-for-agent"]);
+        building.xrefs = vec![pr(41, true, "#13: build it")];
+        let mut claimed = slice_issue(14, &["ready-for-agent"]);
+        claimed.assignees = vec!["calin".into()];
+        claimed.comments = vec![comment("calin")];
+        let mut shipped = slice_issue(15, &["ready-for-agent"]);
+        shipped.xrefs = vec![pr(42, false, "Builds #15."), pr(43, false, "Slice #99; unblocks #15.")];
+        let mut dropped = slice_issue(16, &["ready-for-agent"]);
+        dropped.open = false;
+        dropped.not_planned = true;
+        let checks = [Check {
+            parent: Some(2),
+            ..check(50, "Check", "c50", true, &["check:owner".into()], "From slice #15.").unwrap()
+        }];
+        let subs = [ready, built, blocked, building, claimed, shipped, dropped];
+        let kids = slices_of(2, &subs, &checks);
+        let sl = |n: u32| kids.iter().find(|s| s.num == n).unwrap();
+        assert_eq!(sl(10).state, SliceState::Ready);
+        assert_eq!(sl(11).state, SliceState::Built);
+        assert_eq!(sl(12).state, SliceState::Blocked);
+        assert_eq!(sl(13).state, SliceState::Building);
+        assert_eq!(sl(14).state, SliceState::Building);
+        assert_eq!(sl(15).state, SliceState::Ready);
+        assert_eq!(sl(16).state, SliceState::Dropped);
+        assert_eq!(sl(10).parent, Some(2));
+        assert_eq!(sl(10).size.as_deref(), Some("m"));
+        assert!(sl(12).escalate);
+        assert_eq!(sl(11).pr.as_ref().map(|p| p.num), Some(40));
+        assert_eq!(sl(13).pr.as_ref().map(|p| p.num), Some(41));
+        assert_eq!(sl(15).shipped.as_ref().map(|p| p.num), Some(42));
+        assert_eq!(sl(15).checks[0].num, 50);
+        assert!(sl(14).checks.is_empty());
+
+        let mut fold = issue(2);
+        fold.open = false;
+        fold.sub_total = 7;
+        fold.sub_closed = 2;
+        let human = slice_issue(17, &["ready-for-human"]);
+        let elsewhere = Check {
+            num: 60,
+            parent: Some(900),
+            ..checks[0].clone()
+        };
+        let m = build(map(""), vec![fold, issue(3), human], &[checks[0].clone(), elsewhere]);
+        assert_eq!(
+            m.tickets.iter().map(|t| t.num).collect::<Vec<_>>(),
+            [2, 3],
+            "17 is a slice, not a decision"
+        );
+        assert_eq!(m.slice(17).unwrap().state, SliceState::Human);
+        assert_eq!(m.slice(17).unwrap().parent, None);
+        assert_eq!(m.ticket(2).unwrap().slices, Some(SliceCount { total: 7, closed: 2 }));
+        assert_eq!(m.ticket(3).unwrap().slices, None);
+        assert_eq!(
+            m.checks.iter().map(|c| c.num).collect::<Vec<_>>(),
+            [50],
+            "60 is another map's"
+        );
     }
 
     #[test]
@@ -446,7 +809,7 @@ mod tests {
         let mut dropped = issue(3);
         dropped.open = false;
         dropped.not_planned = true;
-        let m = build(map(""), vec![done, dropped]);
+        let m = build_(map(""), vec![done, dropped]);
         assert_eq!(status(&m, 2), Status::Resolved);
         assert_eq!(m.ticket(2).unwrap().answer.as_deref(), Some("Yes."));
         assert_eq!(status(&m, 3), Status::OutOfScope);
@@ -469,7 +832,7 @@ mod tests {
         let mut abandoned = issue(3);
         abandoned.assignees = vec!["me".into()];
         abandoned.comments = vec![comment("someone-else")];
-        let m = build(map(""), vec![claimed, abandoned]);
+        let m = build_(map(""), vec![claimed, abandoned]);
         assert_eq!(status(&m, 2), Status::Claimed);
         assert!(!m.ticket(2).unwrap().stale_claim);
         assert_eq!(status(&m, 3), Status::Frontier);
@@ -485,7 +848,7 @@ mod tests {
         c.blocked_by = vec![blocker(99, true)];
         let mut d = issue(5);
         d.blocked_by = vec![blocker(98, false)];
-        let m = build(map(""), vec![a, b, c, d]);
+        let m = build_(map(""), vec![a, b, c, d]);
         assert_eq!(status(&m, 2), Status::Frontier);
         assert_eq!(status(&m, 3), Status::Blocked);
         assert_eq!(status(&m, 4), Status::Blocked);
@@ -519,7 +882,7 @@ mod tests {
         x.blocked_by = vec![blocker(6, true)];
         let mut y = issue(6);
         y.blocked_by = vec![blocker(5, true)];
-        let m = build(map(""), vec![c, b, a, x, y]);
+        let m = build_(map(""), vec![c, b, a, x, y]);
         let r: Vec<(u32, u32)> = m.tickets.iter().map(|t| (t.num, t.rank)).collect();
         assert_eq!(&r[..3], &[(2, 0), (3, 1), (4, 2)]);
     }
@@ -531,7 +894,7 @@ mod tests {
 ## Not yet specified\n\n- **Today's row.** Whether today stands out. <clears-with: 3>\n- A loose patch with no bold title at all, which runs on and on\n";
         let mut done = issue(2);
         done.open = false;
-        let m = build(map(body), vec![done, issue(3)]);
+        let m = build_(map(body), vec![done, issue(3)]);
         assert_eq!(m.destination, "Somewhere good.");
         assert_eq!(
             m.ticket(2).unwrap().gist.as_deref(),
@@ -561,7 +924,7 @@ mod tests {
         t.labels = vec!["bug".into(), "wayfinder:prototype".into()];
         let mut u = issue(3);
         u.labels = vec![];
-        let m = build(map(""), vec![t, u]);
+        let m = build_(map(""), vec![t, u]);
         assert_eq!(m.ticket(2).unwrap().kind, "prototype");
         assert_eq!(m.ticket(3).unwrap().kind, "grilling");
     }

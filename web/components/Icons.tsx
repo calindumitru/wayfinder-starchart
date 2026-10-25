@@ -39,6 +39,9 @@ export const Close = (p: P) => svg(<path d="M6 6l12 12M18 6 6 18" />, p);
 export const External = (p: P) => svg(<><path d="M14 4h6v6" /><path d="M20 4 10 14" /><path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5" /></>, p);
 export const Expand = (p: P) => svg(<><path d="M14 4h6v6" /><path d="M10 20H4v-6" /><path d="M20 4l-7 7M4 20l7-7" /></>, p);
 export const Collapse = (p: P) => svg(<><path d="M4 14h6v6" /><path d="M20 10h-6V4" /><path d="M10 14l-7 7M14 10l7-7" /></>, p);
+export const Doc = (p: P) => svg(<><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8Z" /><path d="M14 3v5h5M9 13h6M9 17h6" /></>, p);
+export const Link = (p: P) => svg(<><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1" /><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1" /></>, p);
+export const Branch = (p: P) => svg(<><circle cx="6" cy="5" r="2" /><circle cx="6" cy="19" r="2" /><circle cx="18" cy="8" r="2" /><path d="M6 7v10M18 10c0 4-6 3-12 7" /></>, p);
 export const Pointer = (p: P) => svg(<><rect x="6" y="3" width="12" height="18" rx="6" /><path d="M12 7v4" /></>, p);
 export const Constellation = (p: P) =>
   svg(
