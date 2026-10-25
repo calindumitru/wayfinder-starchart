@@ -187,6 +187,18 @@ pub struct T3 {
     pub worktree_base: String,
 }
 
+/// The id of this machine's T3 environment, which a `t3code://threads/<environment>/<thread>`
+/// link needs to open a thread in the app. T3 keeps it in its data directory: `$T3CODE_HOME`,
+/// or `~/.t3` by default.
+pub fn environment_id() -> Option<String> {
+    let home = std::env::var("T3CODE_HOME")
+        .ok()
+        .or_else(|| std::env::var("HOME").ok().map(|h| format!("{h}/.t3")))?;
+    let id = std::fs::read_to_string(format!("{home}/userdata/environment-id")).ok()?;
+    let id = id.trim();
+    (!id.is_empty()).then(|| id.to_string())
+}
+
 impl T3 {
     pub async fn start(&self, project: &str, launch: &Launch) -> Result<Value> {
         let mut cmd = Command::new(&self.bin);

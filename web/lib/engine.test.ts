@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { layout, mulberry32, ringR } from "./engine";
+import { findClusters, gather, layout, mulberry32, ringR } from "./engine";
 
 const nodes = () => [
   { num: 2, rank: 0, x: 0, y: 0 },
@@ -27,6 +27,37 @@ describe("layout", () => {
     expect(r(2)).toBeLessThan(r(3));
     expect(r(3)).toBeLessThan(r(4));
     expect(Math.abs(r(4) - ringR(2))).toBeLessThan(165);
+  });
+});
+
+// Two hubs, 1 and 10, each blocking four tickets, plus a lone pair.
+const hubby = () => {
+  const nodes = [1, 2, 3, 4, 5, 10, 11, 12, 13, 14, 20, 21].map((num) => ({ num, rank: num % 10 ? 1 : 0, x: 0, y: 0 }));
+  const edges = [2, 3, 4, 5].map((to) => ({ from: 1, to, satisfied: true }))
+    .concat([11, 12, 13, 14].map((to) => ({ from: 10, to, satisfied: false })))
+    .concat([{ from: 20, to: 21, satisfied: true }]);
+  return { nodes, edges };
+};
+
+describe("clusters", () => {
+  it("are a hub and the neighbours it owns", () => {
+    const { nodes, edges } = hubby();
+    expect(findClusters(nodes, edges)).toEqual([
+      { hub: 1, members: [1, 2, 3, 4, 5] },
+      { hub: 10, members: [10, 11, 12, 13, 14] },
+    ]);
+  });
+
+  it("gather into separate rings that keep strays out", () => {
+    const { nodes, edges } = hubby();
+    layout(nodes, edges);
+    gather(nodes, edges);
+    const at = (num: number) => nodes.find((n) => n.num === num)!;
+    const d = (a: number, b: number) => Math.hypot(at(a).x - at(b).x, at(a).y - at(b).y);
+    for (const m of [2, 3, 4, 5]) expect(d(1, m)).toBeLessThanOrEqual(120);
+    for (const m of [11, 12, 13, 14]) expect(d(10, m)).toBeLessThanOrEqual(120);
+    expect(d(1, 10)).toBeGreaterThan(2 * 120);
+    for (const s of [20, 21]) { expect(d(1, s)).toBeGreaterThan(120); expect(d(10, s)).toBeGreaterThan(120); }
   });
 });
 

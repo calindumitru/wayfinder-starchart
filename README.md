@@ -27,11 +27,12 @@ the map straight from GitHub and can act on it.
   | Grill me on this / Work this ticket | an open ticket | `/wayfinder <map> <ticket>`, optionally in a new worktree |
   | Ask | any ticket | to read the ticket and answer your question, changing nothing |
   | Next on the frontier | the map | `/wayfinder <map>` |
-  | Start a charting session | the map list | `/wayfinder <your idea>` |
+  | Start a charting session | the map list, or the bar under a map | `/wayfinder <your idea>` |
 
   A note you type goes into the prompt, quoted as yours. A ticket's thread is titled
   `#<n> <title>`, so the map can find it again: a ticket with a live thread carries an orbiting
-  moon, which moves faster while the thread runs.
+  moon, which moves faster while the thread runs. Click the moon to open its thread in the T3
+  app (through a `t3code://` link, using the environment id in T3's data directory).
 
 ## Run it
 
