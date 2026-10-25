@@ -1,16 +1,31 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as api from "@/lib/api";
-import { COL } from "@/lib/engine";
-import type { LaunchRequest, MapSummary, Project, Thread, WayMap } from "@/lib/types";
-import { Panel, type Selection } from "./Panel";
+import type { Hover } from "@/lib/engine";
+import type { LaunchRequest, MapSummary, Project, Status, Thread, Ticket, WayMap } from "@/lib/types";
+import * as I from "./Icons";
+import { HoverTip } from "./HoverTip";
+import { Mark, Panel, type Selection } from "./Panel";
 import { StarMap } from "./StarMap";
 
 type Toast = { id: number; text: string; error?: boolean };
 
 const THREAD_POLL_MS = 8000;
 const MAP_POLL_MS = 60000;
+
+const mapName = (name: string) => name.replace(/^(Wayfinder|Map):\s*/i, "");
+
+function ago(t: number | null, now: number) {
+  if (t == null) return "";
+  const m = Math.floor((now - t) / 60000);
+  return m < 1 ? "just now" : m < 60 ? `${m}m ago` : `${Math.floor(m / 60)}h ago`;
+}
+
+// The next ticket a "Next on the frontier" session will likely take: the frontier ticket
+// nearest the map's root.
+const nextUp = (m: WayMap): Ticket | undefined =>
+  m.tickets.filter((t) => t.status === "frontier").sort((a, b) => a.rank - b.rank || a.num - b.num)[0];
 
 // The URL carries the project and the map (?repo=owner/name&map=781), so a reload or the back
 // button lands where you were.
@@ -36,6 +51,16 @@ export function Starchart() {
   const [selection, setSelection] = useState<Selection | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [fatal, setFatal] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+  const [only, setOnly] = useState<Status | null>(null);
+  const [loadedAt, setLoadedAt] = useState<number | null>(null);
+  const [now, setNow] = useState(() => Date.now());
+  const [minimap, setMinimap] = useState<HTMLCanvasElement | null>(null);
+  const [fitSignal, setFitSignal] = useState(0);
+  const [hover, setHover] = useState<Hover | null>(null);
+  const [wide, setWide] = useState(false);
+  const [tip, setTip] = useState<HTMLDivElement | null>(null);
+  const [t3Env, setT3Env] = useState<string | null>(null);
 
   const toast = useCallback((text: string, error = false) => {
     const id = Date.now() + Math.random();
@@ -45,8 +70,9 @@ export function Starchart() {
 
   useEffect(() => {
     api.session().then(
-      (ps) => {
+      ({ projects: ps, t3Environment }) => {
         setProjects(ps);
+        setT3Env(t3Environment);
         const u = readUrl();
         setRepo(ps.find((p) => p.repo === u.repo)?.repo ?? ps[0]?.repo ?? null);
         setMapNum(u.map);
@@ -70,7 +96,10 @@ export function Starchart() {
   const loadMap = useCallback(
     (fresh: boolean) => {
       if (!repo || mapNum == null) return Promise.resolve();
-      return api.map(repo, mapNum, fresh).then(setMap, (e) => toast(e.message, true));
+      return api.map(repo, mapNum, fresh).then(
+        (m) => { setMap(m); setLoadedAt(Date.now()); },
+        (e) => toast(e.message, true),
+      );
     },
     [repo, mapNum, toast],
   );
@@ -88,11 +117,37 @@ export function Starchart() {
     return () => { clearInterval(a); clearInterval(b); };
   }, [mapNum, loadMap, loadThreads]);
 
-  const live = useMemo(() => {
-    const m = new Map<number, string>();
-    for (const t of threads) if (t.ticket != null && !t.settled && !m.has(t.ticket)) m.set(t.ticket, t.status);
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 20000);
+    return () => clearInterval(t);
+  }, []);
+
+  // What stays lit: tickets matching the search (number or title) and the legend's status.
+  const match = useMemo(() => {
+    const q = query.trim().toLowerCase().replace(/^#/, "");
+    if (!map || (!q && !only)) return null;
+    return new Set(
+      map.tickets
+        .filter((t) => (!only || t.status === only) && (!q || String(t.num).startsWith(q) || t.title.toLowerCase().includes(q)))
+        .map((t) => t.num),
+    );
+  }, [map, query, only]);
+
+  // Each ticket's live T3 thread (the newest unsettled one), which its moon stands for.
+  const liveThreads = useMemo(() => {
+    const m = new Map<number, Thread>();
+    for (const t of threads) if (t.ticket != null && !t.settled && !m.has(t.ticket)) m.set(t.ticket, t);
     return m;
   }, [threads]);
+  const live = useMemo(() => new Map([...liveThreads].map(([n, t]) => [n, t.status])), [liveThreads]);
+
+  // A moon opens its thread in the T3 app, through the app's own link scheme.
+  const openThread = (num: number) => {
+    const t = liveThreads.get(num);
+    if (!t) return;
+    if (!t3Env) { toast("Can't open the thread: the server didn't find T3's environment id", true); return; }
+    location.href = `t3code://threads/${t3Env}/${t.threadId}`;
+  };
 
   const launch = useCallback(
     async (req: LaunchRequest) => {
@@ -110,7 +165,12 @@ export function Starchart() {
   );
 
   const selectedNum = selection?.kind === "ticket" ? selection.num : null;
-  const openMap = (n: number | null) => { setSelection(null); setMap(null); setMapNum(n); };
+  const openMap = (n: number | null) => { setSelection(null); setMap(null); setMapNum(n); setQuery(""); setOnly(null); };
+  const refresh = () => {
+    if (mapNum == null) { if (repo) { setSummaries(null); api.maps(repo).then(setSummaries, (e) => toast(e.message, true)); } return; }
+    loadMap(true); loadThreads(); toast("Reloaded from GitHub");
+  };
+  const next = map ? nextUp(map) : undefined;
 
   return (
     <>
@@ -119,56 +179,77 @@ export function Starchart() {
         threads={live}
         selected={selectedNum}
         panelOpen={selection != null}
+        panelWide={wide}
+        match={match}
+        minimap={minimap}
+        fitSignal={fitSignal}
+        tip={tip}
         onSelect={(n) => setSelection(n == null ? null : { kind: "ticket", num: n })}
         onFog={(i) => setSelection({ kind: "fog", index: i })}
+        onMoon={openThread}
+        onHover={setHover}
       />
+
+      {map && mapNum != null && <HoverTip ref={setTip} map={map} hover={hover} live={liveThreads} canOpenThreads={!!t3Env} />}
 
       {fatal && <div className="fatal">Can&apos;t reach the starchart server: {fatal}</div>}
 
-      {mapNum != null && (
-        <>
-          <div id="topleft">
-            <button id="backbtn" onClick={() => openMap(null)}>&larr; Maps</button>
-            <span id="projtag">{repo}</span>
-          </div>
-          <div id="hint">drag to pan &middot; scroll to zoom &middot; click a star</div>
-        </>
+      {repo && (
+        <header id="topbar">
+          <button className="brand" onClick={() => openMap(null)} title="All maps">
+            <I.Sparkle size={22} /> Wayfinder
+          </button>
+          <nav className="crumbs">
+            <I.GitHub size={17} />
+            <button className="crumb" onClick={() => openMap(null)}>{repo.split("/")[1] ?? repo}</button>
+            {mapNum != null && (
+              <>
+                <span className="sep">›</span>
+                <span className="crumb here" title={map?.name}>{map ? mapName(map.name) : `#${mapNum}`}</span>
+              </>
+            )}
+          </nav>
+          <div className="spacer" />
+          {mapNum != null && map && (
+            <SearchBox
+              value={query}
+              onChange={setQuery}
+              onPick={() => { const first = match && map.tickets.find((t) => match.has(t.num)); if (first) setSelection({ kind: "ticket", num: first.num }); }}
+            />
+          )}
+          <button className="tbtn" onClick={refresh}><I.Refresh size={15} /> Refresh</button>
+          {mapNum != null && loadedAt && <span className="ago"><I.Clock size={12} /> {ago(loadedAt, now)}</span>}
+        </header>
+      )}
+
+      {map && mapNum != null && (
+        <Legend map={map} live={live.size} only={only} onOnly={(s) => setOnly(only === s ? null : s)} />
       )}
 
       {map && mapNum != null && repo && (
-        <div id="hud" className={selection ? "hidden" : ""}>
-          <div className="htitle">
-            <h1>{map.name}</h1>
-            {map.destination && <div className="dest">{map.destination.replace(/[*_`]/g, "")}</div>}
-          </div>
-          <div className="hbtns">
-            <button
-              className="primary"
-              disabled={map.counts.frontier === 0}
-              onClick={() => launch({ repo, kind: "next", map: map.num })}
-              title="Start a session that takes the first ticket on the frontier"
-            >
-              Next on the frontier
+        <footer id="hud">
+          <button
+            className="primary next"
+            disabled={map.counts.frontier === 0}
+            onClick={() => launch({ repo, kind: "next", map: map.num })}
+            title="Start a session that takes a ticket on the frontier"
+          >
+            <I.Constellation size={20} /> Next on the frontier <I.Arrow size={16} />
+          </button>
+          {next && (
+            <button className="upnext" onClick={() => setSelection({ kind: "ticket", num: next.num })} title="The frontier ticket nearest the map's root">
+              <Mark status="frontier" /> <b>{next.num}</b> <span>{next.title}</span>
             </button>
-            <button onClick={() => setSelection({ kind: "info" })}>Map</button>
-            <button onClick={() => { loadMap(true); loadThreads(); toast("Reloaded from GitHub"); }}>Refresh</button>
-          </div>
+          )}
           <div className="spacer" />
-          <div className="counts">
-            <span className="c resolved">{map.counts.resolved} resolved</span>
-            <span className="c frontier">{map.counts.frontier} frontier</span>
-            {map.counts.claimed > 0 && <span className="c claimed">{map.counts.claimed} claimed</span>}
-            <span className="c blocked">{map.counts.blocked} blocked</span>
-            {map.counts.outOfScope > 0 && <span className="c oos">{map.counts.outOfScope} out of scope</span>}
-            {live.size > 0 && <span className="c t3">{live.size} in T3</span>}
-          </div>
-          <div className="bar"><span style={{ width: `${map.counts.total ? Math.round((map.counts.resolved * 100) / map.counts.total) : 0}%` }} /></div>
-          <div className="legend">
-            {(["frontier", "claimed", "blocked", "resolved"] as const).map((s) => (
-              <b key={s}><span className="dot" style={{ background: COL[s].core }} />{s}</b>
-            ))}
-          </div>
-        </div>
+          <ChartButton onChart={(idea) => launch({ repo, kind: "chart", note: idea })} />
+          <ViewMenu
+            onInfo={() => setSelection({ kind: "info" })}
+            onFit={() => { setSelection(null); setFitSignal((n) => n + 1); }}
+            onMaps={() => openMap(null)}
+          />
+          <canvas className="minimap" ref={setMinimap} title="Click to move there" />
+        </footer>
       )}
 
       {map && selection && repo && (
@@ -180,6 +261,8 @@ export function Starchart() {
           onClose={() => setSelection(null)}
           onSelect={(n) => setSelection({ kind: "ticket", num: n })}
           onLaunch={launch}
+          wide={wide}
+          onWide={setWide}
         />
       )}
 
@@ -201,6 +284,106 @@ export function Starchart() {
   );
 }
 
+function SearchBox({ value, onChange, onPick }: { value: string; onChange: (v: string) => void; onPick: () => void }) {
+  return (
+    <label className="search">
+      <I.Search size={16} />
+      <input
+        value={value}
+        placeholder="Search tickets…"
+        onChange={(e) => onChange(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") onPick();
+          if (e.key === "Escape") { onChange(""); e.currentTarget.blur(); }
+        }}
+      />
+    </label>
+  );
+}
+
+const LEGEND: { status: Status; label: string; hint: string }[] = [
+  { status: "frontier", label: "Frontier", hint: "ready to take" },
+  { status: "claimed", label: "Claimed", hint: "in progress" },
+  { status: "blocked", label: "Blocked", hint: "waiting on" },
+  { status: "resolved", label: "Resolved", hint: "done" },
+  { status: "out_of_scope", label: "Out of scope", hint: "ruled out" },
+];
+
+// The key to the map, with each status's count; click a status to light only those tickets.
+function Legend({ map, live, only, onOnly }: { map: WayMap; live: number; only: Status | null; onOnly: (s: Status) => void }) {
+  const count: Record<Status, number> = {
+    frontier: map.counts.frontier, claimed: map.counts.claimed, blocked: map.counts.blocked,
+    resolved: map.counts.resolved, out_of_scope: map.counts.outOfScope,
+  };
+  const done = map.counts.total ? Math.round(((map.counts.resolved + map.counts.outOfScope) * 100) / map.counts.total) : 0;
+  return (
+    <aside id="legend">
+      {LEGEND.filter((l) => l.status !== "out_of_scope" || count.out_of_scope > 0).map((l) => (
+        <button key={l.status} className={`lrow ${only === l.status ? "on" : ""} ${only && only !== l.status ? "off" : ""}`} onClick={() => onOnly(l.status)}>
+          <Mark status={l.status} /> <span className="ll">{l.label}</span> <span className="lh">({l.hint})</span>
+          <span className="lc">{count[l.status]}</span>
+        </button>
+      ))}
+      <div className="lrow static"><Mark status="thread" /> <span className="ll">Active T3 thread</span><span className="lc">{live || ""}</span></div>
+      <div className="lrow static"><Mark status="fog" /> <span className="ll">Open question</span><span className="lc">{map.fog.length || ""}</span></div>
+      <div className="lbar" title={`${done}% resolved or ruled out`}><span style={{ width: `${done}%` }} /></div>
+      <div className="lhint">drag to pan · scroll to zoom · click a star</div>
+    </aside>
+  );
+}
+
+// Close a popover on a click anywhere outside it.
+function useOutside(open: boolean, close: () => void) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const f = (e: MouseEvent) => { if (!ref.current?.contains(e.target as Node)) close(); };
+    addEventListener("mousedown", f);
+    return () => removeEventListener("mousedown", f);
+  }, [open, close]);
+  return ref;
+}
+
+function ChartButton({ onChart }: { onChart: (idea: string) => Promise<boolean> }) {
+  const [open, setOpen] = useState(false);
+  const [idea, setIdea] = useState("");
+  const close = useCallback(() => setOpen(false), []);
+  const ref = useOutside(open, close);
+  return (
+    <div className="pop" ref={ref}>
+      <button className="tbtn big" onClick={() => setOpen(!open)}><I.Plus size={18} /> Start a charting session</button>
+      {open && (
+        <div className="popover chartpop">
+          <div className="ptitle">Chart a new map</div>
+          <textarea autoFocus value={idea} onChange={(e) => setIdea(e.target.value)} rows={3} placeholder="The loose idea, in a sentence or two" />
+          <button className="primary" disabled={!idea.trim()} onClick={async () => { if (await onChart(idea)) { setIdea(""); setOpen(false); } }}>
+            Start a charting session
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ViewMenu({ onInfo, onFit, onMaps }: { onInfo: () => void; onFit: () => void; onMaps: () => void }) {
+  const [open, setOpen] = useState(false);
+  const close = useCallback(() => setOpen(false), []);
+  const ref = useOutside(open, close);
+  const item = (label: string, f: () => void) => <button className="mitem" onClick={() => { setOpen(false); f(); }}>{label}</button>;
+  return (
+    <div className="pop" ref={ref}>
+      <button className="tbtn big" onClick={() => setOpen(!open)}><I.List size={18} /> View <I.Chevron size={15} /></button>
+      {open && (
+        <div className="popover menu">
+          {item("Map details", onInfo)}
+          {item("Fit to screen", onFit)}
+          {item("All maps", onMaps)}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function MapList({
   repo, projects, summaries, onRepo, onOpen, onChart,
 }: {
@@ -215,7 +398,7 @@ function MapList({
   const [showClosed, setShowClosed] = useState(false);
   const card = (m: MapSummary) => (
     <div key={m.num} className={`card ${m.open ? "" : "closed"}`} onClick={() => onOpen(m.num)}>
-      <div className="cname">{m.name.replace(/^Wayfinder:\s*/, "")}</div>
+      <div className="cname">{mapName(m.name)}</div>
       <div className="cmeta">
         <span>#{m.num}</span>
         <span>{m.completed}/{m.total} closed</span>
@@ -229,7 +412,7 @@ function MapList({
   return (
     <div id="maplist">
       <div className="listtop">
-        <div id="projname">{repo}</div>
+        <div id="projname">Maps in {repo}</div>
         {projects.length > 1 && (
           <select value={repo} onChange={(e) => onRepo(e.target.value)}>
             {projects.map((p) => <option key={p.repo}>{p.repo}</option>)}

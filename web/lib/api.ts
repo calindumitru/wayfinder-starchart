@@ -13,10 +13,12 @@ async function call<T>(path: string, init?: RequestInit): Promise<T> {
 
 const q = (repo: string) => `repo=${encodeURIComponent(repo)}`;
 
-export async function session(): Promise<Project[]> {
-  const s = await call<{ token: string; projects: Project[] }>("/api/session");
+// The projects, and this machine's T3 environment id (for links that open a thread in the
+// app), when the server could find it.
+export async function session(): Promise<{ projects: Project[]; t3Environment: string | null }> {
+  const s = await call<{ token: string; projects: Project[]; t3Environment?: string | null }>("/api/session");
   token = s.token;
-  return s.projects;
+  return { projects: s.projects, t3Environment: s.t3Environment ?? null };
 }
 
 export const maps = (repo: string) => call<MapSummary[]>(`/api/maps?${q(repo)}`);

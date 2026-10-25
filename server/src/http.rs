@@ -148,7 +148,7 @@ async fn session(State(app): State<Shared>) -> Json<Value> {
         .iter()
         .map(|p| json!({ "repo": p.repo, "path": p.path }))
         .collect();
-    Json(json!({ "token": app.token, "projects": projects }))
+    Json(json!({ "token": app.token, "projects": projects, "t3Environment": crate::t3::environment_id() }))
 }
 
 #[derive(Deserialize)]
