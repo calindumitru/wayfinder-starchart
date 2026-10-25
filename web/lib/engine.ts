@@ -4,7 +4,8 @@
 // lines or pages count as pixels, a ticket with a live T3 thread carries an orbiting moon, hubs
 // gather their neighbours into clusters, and hovering anything explains it (see Hover).
 
-import type { BuildSlice, Edge, SliceState, Status, Ticket, WayMap } from "./types";
+import { attention, collapsed, GLOW_HOURS, recent, type Attention, type Look } from "./attention";
+import type { BuildSlice, Edge, Status, Ticket, WayMap } from "./types";
 
 type Node = Ticket & {
   x: number;
@@ -23,37 +24,46 @@ type Node = Ticket & {
   moon: number;
 };
 type FogPt = { index: number; title: string; anchor: Node | null; x: number; y: number; emph: number };
-// A build slice on the canvas. One with a parent sits at a fixed offset (ox, oy) from it, on a
-// small orbit; one without a parent has its own place (x, y). `vis` eases toward whether it's
-// shown: a fold-in's slices appear when zoomed in, or when the fold-in or one of them is in focus.
-type SNode = BuildSlice & { x: number; y: number; ox: number; oy: number; _x: number; _y: number; vis: number; emph: number; dim: number };
+// A build slice on the canvas, at a fixed offset (ox, oy) from its anchor: its fold-in, or for a
+// slice on the map itself the map's build hub. Open work orbits the anchor; finished work (built,
+// nothing open on it) folds into a ring of dust nearer in. `vis` eases toward whether an open
+// slice is shown: a fold-in's appear when zoomed in, or when the fold-in or one of them is in
+// focus.
+type SNode = BuildSlice & { ox: number; oy: number; _x: number; _y: number; vis: number; emph: number; dim: number; look: Look; dust: boolean };
+// Where a group of slices hangs: a ticket, or the hub for the map's own slices.
+type Anchor = { num: number; _x: number; _y: number; r: number };
 
-// Slice colours: filled once built, an outline with a tint until then.
-export const SCOL: Record<SliceState, string> = {
-  ready: "#4d9bff",
-  building: "#ffb52e",
-  blocked: "#ff4d4d",
-  human: "#f472b6",
-  built: "#3fd07f",
+// Slice colours by look: green to start, blue being built, gold for you, rust gone quiet.
+export const LCOL: Record<Look, string> = {
+  you: "#ffc53d",
+  stalled: "#c8643c",
+  ready: "#34d399",
+  building: "#4d9bff",
+  blocked: "#c2555a",
+  built: "#9fb0c8",
   dropped: "#6f6a7c",
 };
-const SLICE_H = 6.5;
+export const GOLD = "#ffc53d";
+const SLICE_R = 5.2;
+const DEST_R = 110;
+// How long a finished slice's sparkle keeps its glow.
+const AFTERGLOW_HOURS = 12;
 const SLICES_FROM_ZOOM = 0.85;
 // A hub (a ticket wired to three or more others) and the neighbours that hang off it.
 type Cluster = { hub: Node; members: Node[]; cx: number; cy: number; k: number; emph: number; dim: number };
 type Cam = { x: number; y: number; s: number };
 
 export const COL: Record<Status, { core: string; glow: string; r: number; gr: number }> = {
-  resolved: { core: "#b4f5cb", glow: "#2fbf6e", r: 5.2, gr: 22 },
-  frontier: { core: "#d6eeff", glow: "#3b8cff", r: 8.4, gr: 54 },
-  claimed: { core: "#fff1bd", glow: "#ffb22e", r: 7.6, gr: 44 },
+  resolved: { core: "#e6ecf6", glow: "#7d8cab", r: 5.2, gr: 20 },
+  frontier: { core: "#d2fbe6", glow: "#22c58b", r: 8.4, gr: 54 },
+  claimed: { core: "#d6eeff", glow: "#3b8cff", r: 7.6, gr: 44 },
   blocked: { core: "#ff9b8c", glow: "#ff3d3d", r: 6.4, gr: 26 },
   out_of_scope: { core: "#7d7789", glow: "#4a4550", r: 4.2, gr: 16 },
 };
 const LABELCOL: Record<Status, string> = {
-  resolved: "#cfe9d8",
-  frontier: "#e4f2ff",
-  claimed: "#ffeec2",
+  resolved: "#c9d2e2",
+  frontier: "#dcfbea",
+  claimed: "#e4f2ff",
   blocked: "#ffd2cb",
   out_of_scope: "#8a8496",
 };
@@ -81,6 +91,17 @@ export function mulberry32(seed: number) {
 function hexA(hex: string, al: number) {
   const h = hex.replace("#", "");
   return `rgba(${parseInt(h.slice(0, 2), 16)},${parseInt(h.slice(2, 4), 16)},${parseInt(h.slice(4, 6), 16)},${al})`;
+}
+
+// A colour darkened toward black by k (0 keeps it, 1 is black).
+function shade(hex: string, k: number) {
+  const h = hex.replace("#", ""), c = (i: number) => Math.round(parseInt(h.slice(i, i + 2), 16) * (1 - k));
+  return `rgb(${c(0)},${c(2)},${c(4)})`;
+}
+
+// A label's status line, in a lighter tint of its look.
+function statusCol(l: Look) {
+  return { you: "#ffd36b", stalled: "#e8875c", ready: "#7fe3b8", building: "#8fbcff", blocked: "#e48a8e", built: "#b9c5d8", dropped: "#8a8496" }[l];
 }
 
 export const ringR = (rank: number) => 130 + rank * 165;
@@ -195,7 +216,9 @@ export type Hover =
   | { kind: "moon"; num: number }
   | { kind: "fog"; index: number }
   | { kind: "cluster"; hub: number; members: number[] }
-  | { kind: "slice"; num: number };
+  | { kind: "slice"; num: number }
+  | { kind: "dust"; anchor: number }
+  | { kind: "dest" };
 
 export type EngineEvents = {
   onSelect: (num: number | null) => void;
@@ -206,7 +229,8 @@ export type EngineEvents = {
 };
 
 const hoverKey = (h: Hover | null) =>
-  !h ? "" : h.kind === "edge" ? `e${h.from}-${h.to}` : h.kind === "fog" ? `f${h.index}` : h.kind === "cluster" ? `c${h.hub}` : h.kind === "slice" ? `s${h.num}` : `${h.kind[0]}${h.num}`;
+  !h ? "" : h.kind === "edge" ? `e${h.from}-${h.to}` : h.kind === "fog" ? `f${h.index}` : h.kind === "cluster" ? `c${h.hub}`
+    : h.kind === "slice" ? `s${h.num}` : h.kind === "dust" ? `d${h.anchor}` : h.kind === "dest" ? "dest" : `${h.kind[0]}${h.num}`;
 
 // Hover transitions settle in about 170 ms.
 const HOVER_TAU = 0.055;
@@ -229,6 +253,13 @@ export class Engine {
   private sliceBy: Record<number, SNode> = {};
   private kids: Record<number, SNode[]> = {};
   private sliceEdges: { from: number; to: number; open: boolean }[] = [];
+  // The hub the map's own slices hang on, when it has any; and where the map leads.
+  private hub: Anchor | null = null;
+  private dest: { x: number; y: number; text: string } | null = null;
+  private att: Attention = { looks: {}, unlocks: {}, path: [], open: { decisions: 0, slices: 0 }, now: 0 };
+  private now = Date.now();
+  // Labels off: only what's hovered or selected keeps its label.
+  private labels = true;
   private selectedSlice: SNode | null = null;
   private hover: Hover | null = null;
   private pointer: { x: number; y: number } | null = null;
@@ -237,6 +268,7 @@ export class Engine {
   private tip: HTMLElement | null = null;
   private mini: { canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D; box: { x: number; y: number; s: number } } | null = null;
   private fogSprites: HTMLCanvasElement[] = [];
+  private destSprite: HTMLCanvasElement | null = null;
   private threads = new Map<number, string>();
   private mapNum: number | null = null;
   private clock = 0;
@@ -295,8 +327,11 @@ export class Engine {
       this.nodes.forEach((n) => { n.px = n.x; n.py = n.y; });
     }
     this.setupClusters();
+    this.now = Date.now();
+    this.att = attention(m, this.now);
     this.setupSlices(m.slices ?? [], same);
     this.setupFog(m);
+    this.setupDest(m);
     if (this.selected) this.selected = this.byNum[this.selected.num] ?? null;
     if (this.selectedSlice) this.selectedSlice = this.sliceBy[this.selectedSlice.num] ?? null;
     this.setHover(null);
@@ -306,6 +341,10 @@ export class Engine {
       Object.assign(this.fade, { on: true, t: 0, from: 0, to: 1 });
       this.mapAlpha = 0;
     }
+  }
+
+  setLabels(on: boolean) {
+    this.labels = on;
   }
 
   setThreads(t: Map<number, string>) {
@@ -360,8 +399,8 @@ export class Engine {
     this.selectedSlice = sn;
     this.panelW = panelWidth;
     if (sn) {
-      const p = sn.parent != null ? this.byNum[sn.parent] : undefined;
-      const x = p ? p.x + sn.ox : sn.x, y = p ? p.y + sn.oy : sn.y;
+      const p = sn.parent != null ? this.byNum[sn.parent] : null;
+      const x = (p ? p.x : this.hub?._x ?? 0) + sn.ox, y = (p ? p.y : this.hub?._y ?? 0) + sn.oy;
       this.goal.s = Math.max(this.goal.s, 1);
       this.goal.x = (innerWidth - panelWidth) / 2 - x * this.goal.s;
       this.goal.y = innerHeight / 2 - y * this.goal.s;
@@ -376,55 +415,99 @@ export class Engine {
     return n.slices ? [n.slices.closed, n.slices.total] : null;
   }
 
-  // Slices: a fold-in's on a small orbit around it, evenly spaced from the top; slices with no
-  // parent laid out as their own group (by their blockers) beside the decisions.
+  // Slices: each group around its anchor, open ones evenly spaced on an orbit from the top,
+  // finished ones parked on the dust ring. The map's own slices get a hub of their own, set
+  // beside the decisions.
   private setupSlices(list: BuildSlice[], same: boolean) {
     const old = same ? this.sliceBy : {};
     this.slices = list
       .filter((sl) => sl.parent == null || this.byNum[sl.parent])
-      .map((sl) => ({ ...sl, x: old[sl.num]?.x ?? 0, y: old[sl.num]?.y ?? 0, ox: 0, oy: 0, _x: 0, _y: 0, vis: old[sl.num]?.vis ?? 0, emph: 0, dim: 0 }));
+      .map((sl) => ({
+        ...sl, ox: 0, oy: 0, _x: 0, _y: 0, vis: old[sl.num]?.vis ?? 0, emph: 0, dim: 0,
+        look: this.att.looks[sl.num] ?? sl.state, dust: collapsed(sl),
+      }));
     this.sliceBy = {};
     this.kids = {};
+    const loose: SNode[] = [];
     for (const sn of this.slices) {
       this.sliceBy[sn.num] = sn;
       if (sn.parent != null) (this.kids[sn.parent] ??= []).push(sn);
+      else loose.push(sn);
     }
-    for (const group of Object.values(this.kids)) {
-      const R = Math.min(72, 30 + 4.5 * group.length);
-      group.forEach((sn, i) => {
-        const a = -Math.PI / 2 + (i * TAU) / group.length;
-        sn.ox = Math.cos(a) * R;
-        sn.oy = Math.sin(a) * R * 0.85;
+    const oldHub = this.hub;
+    this.hub = null;
+    if (loose.length) {
+      let x = 0, y = 0;
+      if (same && oldHub) ({ _x: x, _y: y } = oldHub);
+      else if (this.nodes.length) {
+        x = Math.max(...this.nodes.map((n) => n.x)) + 220;
+        y = this.nodes.reduce((a, n) => a + n.y, 0) / this.nodes.length;
+      }
+      this.hub = { num: -1, _x: x, _y: y, r: 6 };
+    }
+    const place = (group: SNode[], a: number) => {
+      const live = group.filter((sn) => !sn.dust), dust = group.filter((sn) => sn.dust);
+      const R = Math.min(110, Math.max(58, 40 + 7 * live.length));
+      live.forEach((sn, i) => {
+        const t = -Math.PI / 2 + (i * TAU) / live.length;
+        sn.ox = Math.cos(t) * R; sn.oy = Math.sin(t) * R * 0.85;
       });
-    }
-    this.sliceEdges = this.slices.flatMap((sn) =>
-      sn.blockers.filter((b) => this.sliceBy[b.num]).map((b) => ({ from: b.num, to: sn.num, open: b.open })),
-    );
-    const loose = this.slices.filter((sn) => sn.parent == null);
-    if (!loose.length || (same && loose.every((sn) => old[sn.num]))) return;
-    const looseEdges: Edge[] = this.sliceEdges
-      .filter((e) => this.sliceBy[e.from].parent == null && this.sliceBy[e.to].parent == null)
-      .map((e) => ({ from: e.from, to: e.to, satisfied: !e.open }));
-    const depth = (sn: SNode, seen = new Set<number>()): number => {
-      if (seen.has(sn.num)) return 0;
-      seen.add(sn.num);
-      const bs = sn.blockers.map((b) => this.sliceBy[b.num]).filter((b) => b && b.parent == null);
-      return bs.length ? 1 + Math.max(...bs.map((b) => depth(b, seen))) : 0;
+      const D = this.dustR(a);
+      dust.forEach((sn, i) => {
+        const t = -Math.PI / 2 + ((i + 0.5) * TAU) / dust.length;
+        sn.ox = Math.cos(t) * D; sn.oy = Math.sin(t) * D;
+      });
     };
-    const items = loose.map((sn) => ({ num: sn.num, rank: Math.min(depth(sn), 2), x: 0, y: 0 }));
-    layout(items, looseEdges);
-    // Shrink the rings to suit small squares, then set the group beside the decisions.
-    let tx = 0, cy = 0;
-    if (this.nodes.length) {
-      tx = Math.max(...this.nodes.map((n) => n.x)) + 200;
-      cy = this.nodes.reduce((a, n) => a + n.y, 0) / this.nodes.length;
+    for (const [p, group] of Object.entries(this.kids)) place(group, COL[this.byNum[Number(p)].status].r);
+    if (loose.length) place(loose, 6);
+    this.sliceEdges = this.slices.flatMap((sn) =>
+      sn.dust ? [] : sn.blockers.filter((b) => this.sliceBy[b.num] && !this.sliceBy[b.num].dust).map((b) => ({ from: b.num, to: sn.num, open: b.open })),
+    );
+  }
+
+  // World units for n screen pixels once zoomed in past 1:1, so strokes and specks stay fine
+  // close up; zoomed out they shrink with the map as before.
+  private px(n: number) {
+    return n / Math.max(1, this.ec.s);
+  }
+
+  // The radius of an anchor's dust ring, for a star (or hub) of radius r.
+  private dustR(r: number) {
+    return r + 30;
+  }
+
+  // An open slice's radius: larger the more it frees.
+  private sliceR(sn: SNode) {
+    return SLICE_R * Math.min(2.2, 1 + 0.3 * Math.sqrt(this.att.unlocks[sn.num] ?? 0));
+  }
+
+  private anchorOf(sn: SNode): Anchor | null {
+    if (sn.parent == null) return this.hub;
+    const n = this.byNum[sn.parent];
+    return n ? { num: n.num, _x: n._x, _y: n._y, r: COL[n.status].r } : null;
+  }
+
+  // Where the map leads: past the rim, beyond its outermost tickets.
+  private setupDest(m: WayMap) {
+    this.dest = null;
+    if (!this.att.path.length || !this.nodes.length) return;
+    let cx = 0, cy = 0;
+    this.nodes.forEach((n) => { cx += n.x; cy += n.y; });
+    cx /= this.nodes.length; cy /= this.nodes.length;
+    let rim = 0;
+    this.nodes.forEach((n) => (rim = Math.max(rim, Math.hypot(n.x - cx, n.y - cy))));
+    const top = Math.max(...this.nodes.map((n) => n.rank)), outer = this.nodes.filter((n) => n.rank === top);
+    const ox = outer.reduce((a, n) => a + n.x, 0) / outer.length - cx, oy = outer.reduce((a, n) => a + n.y, 0) / outer.length - cy;
+    // Beyond the outermost tickets, turned aside (a little at a time) until clear of the fog.
+    const base = Math.hypot(ox, oy) > 1 ? Math.atan2(oy, ox) : -Math.PI / 4, R = rim + 190;
+    const clear = (t: number) => Math.min(1e9, ...this.fogPts.map((f) => Math.hypot(cx + Math.cos(t) * R - f.x, cy + Math.sin(t) * R - f.y)));
+    let ang = base;
+    for (let i = 1; i <= 16 && clear(ang) < 260; i++) {
+      const t = base + Math.ceil(i / 2) * 0.2 * (i % 2 ? 1 : -1);
+      if (clear(t) > clear(ang)) ang = t;
     }
-    const minx = Math.min(...items.map((i) => i.x)), my = items.reduce((a, i) => a + i.y, 0) / items.length;
-    items.forEach((it) => {
-      const sn = this.sliceBy[it.num];
-      sn.x = tx + (it.x - minx) * 0.6;
-      sn.y = cy + (it.y - my) * 0.6;
-    });
+    const first = m.destination.split(/(?<=[.!?])\s|\n/)[0].replace(/[*_`#>]/g, "").trim();
+    this.dest = { x: cx + Math.cos(ang) * R, y: cy + Math.sin(ang) * R, text: first };
   }
 
   // Ease the camera so the star sits centred in the space the panel leaves.
@@ -505,7 +588,8 @@ export class Engine {
       minx = Math.min(minx, x - r); miny = Math.min(miny, y - r); maxx = Math.max(maxx, x + r); maxy = Math.max(maxy, y + r);
     };
     this.nodes.forEach((n) => grow(n.x, n.y, 0));
-    this.slices.forEach((sn) => { if (sn.parent == null) grow(sn.x, sn.y, 20); });
+    if (this.hub) grow(this.hub._x, this.hub._y, 120);
+    if (this.dest) grow(this.dest.x, this.dest.y, 100);
     this.fogPts.forEach((f) => grow(f.x, f.y, 90));
     const pad = 70;
     minx -= pad; miny -= pad; maxx += pad; maxy += pad;
@@ -555,13 +639,27 @@ export class Engine {
     return { ax, ay, bx, by, cx: (ax + bx) / 2 + (-dy / len) * bow, cy: (ay + by) / 2 + (dx / len) * bow, len };
   }
 
-  private pickMoon(mx: number, my: number) {
+  // A live thread's moon under the pointer: a ticket's orbiting one, or a shown slice's, which
+  // sits still on its dashed ring.
+  private pickMoon(mx: number, my: number): { num: number } | null {
     for (const n of this.nodes) {
       if (!this.threads.has(n.num)) continue;
       const p = this.w2s(this.moonAt(n));
       if (Math.hypot(p.x - mx, p.y - my) < 9) return n;
     }
+    for (const sn of this.slices) {
+      if (!this.threads.has(sn.num) || sn.dust || sn.vis < 0.5) continue;
+      const p = this.w2s(this.sliceMoonAt(sn));
+      if (Math.hypot(p.x - mx, p.y - my) < 9) return sn;
+    }
     return null;
+  }
+
+  // Where a slice's thread moon sits: on its dashed ring, low on the left, clear of the label
+  // and of the check moons.
+  private sliceMoonAt(sn: SNode) {
+    const R = this.sliceR(sn) + this.px(sn.look === "you" ? 10 : 6), t = Math.PI * 0.75;
+    return { x: sn._x + Math.cos(t) * R, y: sn._y + Math.sin(t) * R, R };
   }
 
   private pickNode(mx: number, my: number) {
@@ -615,15 +713,47 @@ export class Engine {
     return best;
   }
 
-  // A shown slice under the pointer.
+  // A shown open slice under the pointer.
   private pickSlice(mx: number, my: number) {
     let best: SNode | null = null, bd = 1e9;
     for (const sn of this.slices) {
-      if (sn.vis < 0.5) continue;
+      if (sn.vis < 0.5 || sn.dust) continue;
       const p = this.w2s(sn), d = Math.hypot(p.x - mx, p.y - my);
-      if (d < Math.max(10, SLICE_H * this.ec.s + 5) && d < bd) { bd = d; best = sn; }
+      if (d < Math.max(10, this.sliceR(sn) * this.ec.s + 5) && d < bd) { bd = d; best = sn; }
     }
     return best;
+  }
+
+  // Every anchor with finished work to show, and how much: a fold-in's built slices (counted
+  // until they're loaded), and the hub's.
+  private dustGroups() {
+    const out: { a: Anchor; count: number; vis: number }[] = [];
+    for (const n of this.nodes) {
+      const prog = this.progress(n), kids = this.kids[n.num];
+      const count = kids ? kids.filter((k) => k.dust && k.state === "built").length : prog?.[0] ?? 0;
+      if (count) out.push({ a: { num: n.num, _x: n._x, _y: n._y, r: COL[n.status].r }, count, vis: kids ? Math.max(...kids.map((k) => k.vis)) : 0 });
+    }
+    if (this.hub) {
+      const loose = this.slices.filter((sn) => sn.parent == null);
+      const count = loose.filter((k) => k.dust && k.state === "built").length;
+      if (count) out.push({ a: this.hub, count, vis: 1 });
+    }
+    return out;
+  }
+
+  // The dust ring under the pointer.
+  private pickDust(mx: number, my: number) {
+    for (const g of this.dustGroups()) {
+      const c = this.w2s(g.a), d = Math.hypot(c.x - mx, c.y - my), R = this.dustR(g.a.r) * this.ec.s;
+      if (Math.abs(d - R) < Math.max(7, 6 * this.ec.s)) return g.a.num;
+    }
+    return null;
+  }
+
+  private pickDest(mx: number, my: number) {
+    if (!this.dest) return false;
+    const p = this.w2s(this.dest);
+    return Math.hypot(p.x - mx, p.y - my) < Math.max(16, 26 * this.ec.s);
   }
 
   // In order of what sits on top: a moon over its star, a slice over a star, a star over an
@@ -635,6 +765,9 @@ export class Engine {
     if (sl) return { kind: "slice", num: sl.num };
     const n = this.pickNode(mx, my);
     if (n) return { kind: "node", num: n.num };
+    const dust = this.pickDust(mx, my);
+    if (dust != null) return { kind: "dust", anchor: dust };
+    if (this.pickDest(mx, my)) return { kind: "dest" };
     const e = this.pickEdge(mx, my);
     if (e) return { kind: "edge", from: e.from, to: e.to, satisfied: e.satisfied };
     const f = this.pickFog(mx, my);
@@ -647,7 +780,7 @@ export class Engine {
   private setHover(h: Hover | null) {
     if (hoverKey(h) === hoverKey(this.hover)) return;
     this.hover = h;
-    this.canvas.classList.toggle("pointer", !!h && h.kind !== "cluster" && h.kind !== "edge");
+    this.canvas.classList.toggle("pointer", !!h && h.kind !== "cluster" && h.kind !== "edge" && h.kind !== "dest" && !(h.kind === "dust" && h.anchor < 0));
     this.events.onHover(h);
   }
 
@@ -658,6 +791,8 @@ export class Engine {
     if (sl) { this.events.onSlice(sl.num); return; }
     const n = this.pickNode(mx, my);
     if (n) { this.events.onSelect(n.num); return; }
+    const dust = this.pickDust(mx, my);
+    if (dust != null && dust >= 0) { this.events.onSelect(dust); return; }
     const f = this.pickFog(mx, my);
     if (f) { this.events.onFog(f.index); return; }
     this.events.onSelect(null);
@@ -760,6 +895,8 @@ export class Engine {
       focusing = true;
       const sn = this.sliceBy[h.num];
       if (sn?.parent != null) near.add(sn.parent);
+    } else if (h?.kind === "dust" && h.anchor >= 0) {
+      near.add(h.anchor);
     }
     // The slices that stay lit: a hovered fold-in's, or a hovered slice and its blocking edges.
     const litSlices = new Set<number>();
@@ -825,8 +962,9 @@ export class Engine {
       const n = this.byNum[h.num];
       if (n && n !== this.selected) { const p = this.w2s(n); a = { ...p, r: this.radius(n) * this.ec.s + 14 }; }
     } else if (h?.kind === "moon") {
-      const n = this.byNum[h.num];
+      const n = this.byNum[h.num], sn = this.sliceBy[h.num];
       if (n) { const p = this.w2s(this.moonAt(n)); a = { ...p, r: 14 }; }
+      else if (sn) { const p = this.w2s(this.sliceMoonAt(sn)); a = { ...p, r: 14 }; }
     } else if (h?.kind === "edge") {
       const A = this.byNum[h.from], B = this.byNum[h.to];
       if (A && B) {
@@ -841,7 +979,12 @@ export class Engine {
       if (c) { const p = this.w2s({ x: c.cx, y: c.cy }); a = { x: p.x, y: p.y, r: c.k * CLUSTER_ASPECT.x * this.ec.s * 0.75 }; }
     } else if (h?.kind === "slice") {
       const sn = this.sliceBy[h.num];
-      if (sn && sn !== this.selectedSlice) a = { ...this.w2s(sn), r: SLICE_H * this.ec.s + 14 };
+      if (sn && sn !== this.selectedSlice) a = { ...this.w2s(sn), r: this.sliceR(sn) * this.ec.s + 14 };
+    } else if (h?.kind === "dust") {
+      const g = this.dustGroups().find((d) => d.a.num === h.anchor);
+      if (g) a = { ...this.w2s(g.a), r: (this.dustR(g.a.r) + 8) * this.ec.s };
+    } else if (h?.kind === "dest" && this.dest) {
+      a = { ...this.w2s(this.dest), r: 24 * this.ec.s + 10 };
     }
     if (!a || this.mapAlpha < 0.5) { el.dataset.show = ""; return; }
     const w = el.offsetWidth, ht = el.offsetHeight, right = innerWidth - this.panelW - 12;
@@ -853,21 +996,103 @@ export class Engine {
     el.dataset.show = "1";
   }
 
-  // Each fold-in's slice orbit, faint, while its slices show.
+  // Each group's orbit of open slices, faint, while they show.
   private drawOrbitsOfSlices() {
     const ctx = this.ctx;
-    for (const [p, group] of Object.entries(this.kids)) {
-      const n = this.byNum[Number(p)], vis = Math.max(...group.map((g) => g.vis));
-      if (!n || vis < 0.02) continue;
-      const R = Math.hypot(group[0].ox, group[0].oy / 0.85);
-      ctx.globalAlpha = this.mapAlpha * vis * (1 - 0.7 * n.dim);
-      ctx.strokeStyle = "rgba(170,190,240,0.16)"; ctx.lineWidth = 1 / this.ec.s;
-      ctx.beginPath(); ctx.ellipse(n._x, n._y, R, R * 0.85, 0, 0, TAU); ctx.stroke();
+    const groups: [Anchor | null, SNode[], number][] = Object.entries(this.kids).map(([p, g]) => {
+      const n = this.byNum[Number(p)];
+      return [n ? { num: n.num, _x: n._x, _y: n._y, r: 0 } : null, g, n?.dim ?? 0];
+    });
+    if (this.hub) groups.push([this.hub, this.slices.filter((sn) => sn.parent == null), 0]);
+    for (const [a, group, dim] of groups) {
+      const live = group.filter((g) => !g.dust);
+      if (!a || !live.length) continue;
+      const vis = Math.max(...live.map((g) => g.vis));
+      if (vis < 0.02) continue;
+      const R = Math.hypot(live[0].ox, live[0].oy / 0.85);
+      ctx.globalAlpha = this.mapAlpha * vis * (1 - 0.7 * dim);
+      ctx.strokeStyle = "rgba(170,190,240,0.14)"; ctx.lineWidth = 1 / this.ec.s;
+      ctx.beginPath(); ctx.ellipse(a._x, a._y, R, R * 0.85, 0, 0, TAU); ctx.stroke();
     }
     ctx.globalAlpha = this.mapAlpha;
   }
 
-  // A blocking edge between two shown slices: red and dashed while the blocker is open.
+  // Finished work: a ring of dust around its anchor, a speck per built slice, scattered the same
+  // way every time. One built in the last two days flares white where it joined the ring.
+  private drawDust() {
+    const ctx = this.ctx, hov = this.hover?.kind === "dust" ? this.hover.anchor : null;
+    for (const g of this.dustGroups()) {
+      const n = g.a.num >= 0 ? this.byNum[g.a.num] : null, hi = hov === g.a.num ? 1 : 0;
+      ctx.globalAlpha = this.mapAlpha * (0.55 + 0.45 * Math.max(g.vis, hi)) * (n ? 1 - 0.6 * n.dim : 1);
+      const R = this.dustR(g.a.r), rnd = mulberry32(g.a.num * 7 + 3), specks = Math.min(160, g.count * 5);
+      ctx.fillStyle = hi ? "rgba(225,232,248,0.95)" : "rgba(200,212,235,0.7)";
+      for (let i = 0; i < specks; i++) {
+        const t = rnd() * TAU, r = R + (rnd() - 0.5) * 9, sz = this.px(0.5 + rnd() * (i % 5 ? 0.6 : 1.1));
+        ctx.beginPath(); ctx.arc(g.a._x + Math.cos(t) * r, g.a._y + Math.sin(t) * r, sz, 0, TAU); ctx.fill();
+      }
+      if (hi) {
+        ctx.strokeStyle = "rgba(200,212,235,0.35)"; ctx.lineWidth = 1 / this.ec.s; ctx.setLineDash([2 / this.ec.s, 4 / this.ec.s]);
+        ctx.beginPath(); ctx.arc(g.a._x, g.a._y, R + 8, 0, TAU); ctx.arc(g.a._x, g.a._y, R - 8, 0, TAU, true); ctx.stroke();
+        ctx.setLineDash([]);
+      }
+    }
+    // A slice built in the last two days marks where it joined the ring with a small sparkle,
+    // kept well below a decision's brightness and fading as it ages; only in its first
+    // AFTERGLOW_HOURS does it also glow.
+    for (const sn of this.slices) {
+      if (!sn.dust || !recent(sn, this.now)) continue;
+      const a = this.anchorOf(sn), n = sn.parent != null ? this.byNum[sn.parent] : null;
+      if (!a) continue;
+      const x = sn._x, y = sn._y, age = (this.now - Date.parse(sn.closedAt!)) / 3_600_000;
+      const glow = age < AFTERGLOW_HOURS;
+      ctx.globalAlpha = this.mapAlpha * (n ? 1 - 0.6 * n.dim : 1) * (glow ? 1 : 0.6 * (1 - 0.4 * (age / GLOW_HOURS)));
+      if (glow) {
+        const G = this.px(9), g = ctx.createRadialGradient(x, y, 0, x, y, G);
+        g.addColorStop(0, "rgba(235,240,255,0.6)"); g.addColorStop(1, "rgba(200,210,255,0)");
+        ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, G, 0, TAU); ctx.fill();
+      }
+      this.sparkle(x, y, this.px(glow ? 5 : 4), glow ? "rgba(255,255,255,0.95)" : "rgba(214,222,240,0.9)");
+    }
+    ctx.globalAlpha = this.mapAlpha;
+  }
+
+  // A four-pointed sparkle.
+  private sparkle(x: number, y: number, r: number, fill: string) {
+    const ctx = this.ctx, w = r * 0.18;
+    ctx.fillStyle = fill;
+    ctx.beginPath();
+    ctx.moveTo(x, y - r); ctx.quadraticCurveTo(x + w, y - w, x + r, y); ctx.quadraticCurveTo(x + w, y + w, x, y + r);
+    ctx.quadraticCurveTo(x - w, y + w, x - r, y); ctx.quadraticCurveTo(x - w, y - w, x, y - r);
+    ctx.fill();
+  }
+
+  // The hub the map's own slices hang on: a small pale core with its build ring.
+  private drawHub() {
+    const h = this.hub;
+    if (!h) return;
+    const ctx = this.ctx, loose = this.slices.filter((sn) => sn.parent == null && sn.state !== "dropped");
+    const built = loose.filter((sn) => sn.state === "built").length;
+    const g = ctx.createRadialGradient(h._x, h._y, 0, h._x, h._y, 22);
+    g.addColorStop(0, "rgba(190,205,240,0.45)"); g.addColorStop(1, "rgba(150,170,230,0)");
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(h._x, h._y, 22, 0, TAU); ctx.fill();
+    ctx.fillStyle = "#e3e9f6"; ctx.beginPath(); ctx.arc(h._x, h._y, 3.2, 0, TAU); ctx.fill();
+    this.drawProgress(h._x, h._y, h.r + 12, built, loose.length);
+  }
+
+  // A build ring: a faint circle that fills green as slices are built.
+  private drawProgress(x: number, y: number, R: number, done: number, all: number) {
+    const ctx = this.ctx;
+    ctx.lineWidth = this.px(2.6); ctx.lineCap = "round";
+    ctx.strokeStyle = "rgba(200,215,255,0.14)";
+    ctx.beginPath(); ctx.arc(x, y, R, 0, TAU); ctx.stroke();
+    if (done) {
+      ctx.strokeStyle = LCOL.ready;
+      ctx.beginPath(); ctx.arc(x, y, R, -Math.PI / 2, -Math.PI / 2 + (TAU * done) / Math.max(1, all)); ctx.stroke();
+    }
+    ctx.lineCap = "butt";
+  }
+
+  // A blocking edge between two shown open slices: red and dashed while the blocker is open.
   private drawSliceEdge(e: { from: number; to: number; open: boolean }) {
     const a = this.sliceBy[e.from], b = this.sliceBy[e.to], ctx = this.ctx;
     const vis = Math.min(a.vis, b.vis);
@@ -876,8 +1101,9 @@ export class Engine {
     ctx.globalAlpha = this.mapAlpha * vis * (1 - 0.75 * Math.min(a.dim, b.dim));
     const col = e.open ? "255,96,96" : "120,170,255";
     const dx = b._x - a._x, dy = b._y - a._y, len = Math.hypot(dx, dy) || 1, ux = dx / len, uy = dy / len;
-    const sx = a._x + ux * (SLICE_H + 3), sy = a._y + uy * (SLICE_H + 3), tx = b._x - ux * (SLICE_H + 4), ty = b._y - uy * (SLICE_H + 4);
-    ctx.strokeStyle = `rgba(${col},${0.55 + 0.4 * hi})`; ctx.lineWidth = 1.2 + hi;
+    const ra = this.sliceR(a) + 3, rb = this.sliceR(b) + 4;
+    const sx = a._x + ux * ra, sy = a._y + uy * ra, tx = b._x - ux * rb, ty = b._y - uy * rb;
+    ctx.strokeStyle = `rgba(${col},${0.5 + 0.4 * hi})`; ctx.lineWidth = 1.1 + hi;
     if (e.open) { ctx.setLineDash([3, 4]); ctx.lineDashOffset = -this.clock * 6; }
     ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(tx, ty); ctx.stroke();
     ctx.setLineDash([]); ctx.lineDashOffset = 0;
@@ -889,68 +1115,262 @@ export class Engine {
     ctx.globalAlpha = this.mapAlpha;
   }
 
-  // A slice: a rounded square, filled once built, an outline with a tint until then. Open
-  // checks hang off it as small flags (amber for the owner, blue for an agent).
+  // An open slice: a small planet in its look's colour, sized by what it frees. Waiting on you
+  // carries a gold halo; blocked is hollow; stalled is dull rust with no glow. Its open checks are
+  // small fixed satellites (gold for the owner, blue for an agent), and a live T3 thread a dashed
+  // ring that turns.
   private drawSlice(sn: SNode) {
-    if (sn.vis < 0.02) return;
-    const ctx = this.ctx, col = SCOL[sn.state], x = sn._x, y = sn._y;
+    if (sn.vis < 0.02 || sn.dust) return;
+    const ctx = this.ctx, col = LCOL[sn.look], x = sn._x, y = sn._y;
     const searched = this.match != null && !this.match.has(sn.num) ? 0.2 : 1;
     ctx.globalAlpha = this.mapAlpha * sn.vis * searched * (1 - 0.7 * sn.dim);
-    const h = SLICE_H * (1 + 0.25 * sn.emph) * (0.6 + 0.4 * sn.vis);
-    const g = ctx.createRadialGradient(x, y, 0, x, y, h * 3);
-    g.addColorStop(0, hexA(col, 0.35 + 0.25 * sn.emph)); g.addColorStop(1, hexA(col, 0));
-    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, h * 3, 0, TAU); ctx.fill();
-    const r = h * 0.35;
-    ctx.beginPath(); ctx.roundRect(x - h, y - h, h * 2, h * 2, r);
-    if (sn.state === "built") { ctx.fillStyle = col; ctx.fill(); }
-    else {
-      ctx.fillStyle = hexA(col, sn.state === "dropped" ? 0.08 : 0.22); ctx.fill();
-      ctx.strokeStyle = col; ctx.lineWidth = 1.6; ctx.stroke();
+    const r = this.sliceR(sn) * (1 + 0.2 * sn.emph) * (0.6 + 0.4 * sn.vis);
+    if (sn.look !== "stalled" && sn.look !== "dropped") {
+      const gr = r * (sn.look === "you" ? 4.2 : 3);
+      const g = ctx.createRadialGradient(x, y, 0, x, y, gr);
+      g.addColorStop(0, hexA(col, (sn.look === "blocked" ? 0.18 : 0.38) + 0.2 * sn.emph)); g.addColorStop(1, hexA(col, 0));
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, gr, 0, TAU); ctx.fill();
     }
-    // A live T3 thread on it: a ring that turns.
-    if (this.threads.has(sn.num)) {
-      ctx.strokeStyle = "rgba(225,215,255,0.8)"; ctx.lineWidth = 1; ctx.setLineDash([2, 3]); ctx.lineDashOffset = -this.clock * 8;
-      ctx.beginPath(); ctx.arc(x, y, h + 6, 0, TAU); ctx.stroke(); ctx.setLineDash([]); ctx.lineDashOffset = 0;
+    if (sn.look === "blocked" || sn.look === "dropped") {
+      ctx.fillStyle = hexA(col, 0.14); ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.fill();
+      ctx.strokeStyle = hexA(col, 0.9); ctx.lineWidth = 1.4; ctx.stroke();
+    } else {
+      // Lit from the upper left.
+      const sg = ctx.createRadialGradient(x - r * 0.35, y - r * 0.4, r * 0.1, x, y, r);
+      if (sn.look === "stalled") {
+        sg.addColorStop(0, "#e9a27c"); sg.addColorStop(0.45, "#b45a35"); sg.addColorStop(1, "#5c2617");
+      } else {
+        sg.addColorStop(0, "#ffffff"); sg.addColorStop(0.3, hexA(col, 1)); sg.addColorStop(1, shade(col, 0.45));
+      }
+      ctx.fillStyle = sg; ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.fill();
     }
-    sn.checks.filter((c) => c.open).slice(0, 2).forEach((c, i) => {
-      const fx = x + h + 3 + i * 6, fy = y - h - 1;
-      ctx.strokeStyle = "rgba(220,225,235,0.8)"; ctx.lineWidth = 1;
-      ctx.beginPath(); ctx.moveTo(fx, fy + 8); ctx.lineTo(fx, fy - 2); ctx.stroke();
-      ctx.fillStyle = c.kind === "owner" ? "#ffb52e" : "#4d9bff";
-      ctx.beginPath(); ctx.moveTo(fx, fy - 2); ctx.lineTo(fx + 5, fy); ctx.lineTo(fx, fy + 2.5); ctx.closePath(); ctx.fill();
+    if (sn.look === "you") {
+      ctx.strokeStyle = hexA(GOLD, 0.85); ctx.lineWidth = this.px(1.5);
+      ctx.beginPath(); ctx.arc(x, y, r + this.px(5), 0, TAU); ctx.stroke();
+    }
+    // A live T3 thread on it: a dashed ring that turns, with a moon on it to click, which opens
+    // the thread. Hovered, the moon grows.
+    const thread = this.threads.get(sn.num);
+    if (thread) {
+      const m = this.sliceMoonAt(sn), mh = this.hover?.kind === "moon" && this.hover.num === sn.num ? 1 : 0;
+      const running = thread === "running" || thread === "starting";
+      ctx.strokeStyle = `rgba(225,215,255,${running ? 0.8 : 0.45})`; ctx.lineWidth = this.px(1);
+      ctx.setLineDash([this.px(2.5), this.px(3.5)]); ctx.lineDashOffset = -this.clock * this.px(running ? 8 : 3);
+      ctx.beginPath(); ctx.arc(x, y, m.R, 0, TAU); ctx.stroke(); ctx.setLineDash([]); ctx.lineDashOffset = 0;
+      const gr = this.px(7 + 5 * mh), mg = ctx.createRadialGradient(m.x, m.y, 0, m.x, m.y, gr);
+      mg.addColorStop(0, "rgba(225,215,255,0.7)"); mg.addColorStop(1, "rgba(180,170,255,0)");
+      ctx.fillStyle = mg; ctx.beginPath(); ctx.arc(m.x, m.y, gr, 0, TAU); ctx.fill();
+      ctx.fillStyle = "#f1ebff"; ctx.beginPath(); ctx.arc(m.x, m.y, this.px(2.6 * (1 + 0.4 * mh)), 0, TAU); ctx.fill();
+    }
+    // An open agent check is a small blue moon, one per check, up and to the left, clear of the
+    // label. An owner check needs no moon: it's what makes the slice gold, and the label names it.
+    sn.checks.filter((c) => c.open && c.kind !== "owner").slice(0, 3).forEach((c, i) => {
+      const t = -Math.PI * 0.75 + (i - 1) * 0.6, d = r + this.px(sn.look === "you" ? 11 : 7);
+      const mx = x + Math.cos(t) * d, my = y + Math.sin(t) * d, mc = c.kind === "owner" ? GOLD : LCOL.building;
+      ctx.fillStyle = hexA(mc, 0.3); ctx.beginPath(); ctx.arc(mx, my, this.px(4.2), 0, TAU); ctx.fill();
+      ctx.fillStyle = mc; ctx.beginPath(); ctx.arc(mx, my, this.px(2.2), 0, TAU); ctx.fill();
     });
     if (this.selectedSlice === sn) {
-      ctx.strokeStyle = "rgba(255,255,255,0.9)"; ctx.lineWidth = 1.4;
-      ctx.beginPath(); ctx.roundRect(x - h - 5, y - h - 5, h * 2 + 10, h * 2 + 10, r + 3); ctx.stroke();
+      ctx.strokeStyle = "rgba(255,255,255,0.9)"; ctx.lineWidth = this.px(1.4);
+      ctx.beginPath(); ctx.arc(x, y, r + this.px(sn.look === "you" ? 9 : 6), 0, TAU); ctx.stroke();
     }
     ctx.globalAlpha = this.mapAlpha;
   }
 
-  // Slice labels, in screen space: the number once its square is a fair size, the title for the
-  // hovered or selected one. They yield to the tickets' labels already placed.
-  private drawSliceLabels(a: number, placed: { x: number; y: number; w: number }[], fs: number) {
-    const ctx = this.ctx, s = this.cam.s;
+  // Where the recommended path's steps sit now: a slice where it's drawn, or its anchor while
+  // it's folded away; a ticket's star; the destination.
+  private pathPoints() {
+    type P = { x: number; y: number; r: number; kind: "slice" | "ticket" | "dest" };
+    const pts: P[] = [];
+    for (const st of this.att.path) {
+      let p: P | null = null;
+      if (st.kind === "dest") p = this.dest && { x: this.dest.x, y: this.dest.y, r: 12, kind: "dest" };
+      else if (st.kind === "ticket") {
+        // Clear of the build ring, when it has one.
+        const n = this.byNum[st.num];
+        p = n && { x: n._x, y: n._y, r: this.progress(n) ? COL[n.status].r + 15 + this.px(9) : this.radius(n) + 8, kind: "ticket" };
+      }
+      else {
+        const sn = this.sliceBy[st.num], a = sn && this.anchorOf(sn);
+        if (sn && sn.vis > 0.5 && !sn.dust) p = { x: sn._x, y: sn._y, r: this.sliceR(sn) + this.px(sn.look === "you" ? 10 : 6), kind: "slice" };
+        else if (a) p = { x: a._x, y: a._y, r: a.r + 15 + this.px(9), kind: "ticket" };
+      }
+      const last = pts[pts.length - 1];
+      if (p && !(last && Math.hypot(last.x - p.x, last.y - p.y) < 1)) pts.push(p);
+    }
+    return pts;
+  }
+
+  // The recommended path: a suggestion, not a dependency, so it's drawn unlike the edges: a
+  // dashed gold line with an arrowhead on each leg. It follows real dependencies (a slice to the
+  // slice it frees, a slice to its fold-in, a decision to the decision it unblocks), and each
+  // ticket it passes through carries a gold ring, so it visibly runs through the fold-in. The
+  // last leg, to the destination, isn't a dependency at all: fainter, and dotted.
+  private drawPath() {
+    const pts = this.pathPoints(), ctx = this.ctx;
+    if (pts.length < 2) return;
+    const dim = this.hover && this.hover.kind !== "dest" ? 0.45 : 0;
+    ctx.globalAlpha = this.mapAlpha * (1 - dim);
+    for (let i = 1; i < pts.length; i++) {
+      const A = pts[i - 1], B = pts[i], toDest = B.kind === "dest";
+      const dx = B.x - A.x, dy = B.y - A.y, len = Math.hypot(dx, dy) || 1, ux = dx / len, uy = dy / len;
+      if (len < A.r + B.r + 4) continue;
+      const ax = A.x + ux * A.r, ay = A.y + uy * A.r, bx = B.x - ux * B.r, by = B.y - uy * B.r;
+      const bow = Math.min(36, len * 0.1), cx = (ax + bx) / 2 - uy * bow, cy = (ay + by) / 2 + ux * bow;
+      ctx.strokeStyle = hexA(GOLD, toDest ? 0.06 : 0.12); ctx.lineWidth = this.px(6);
+      ctx.beginPath(); ctx.moveTo(ax, ay); ctx.quadraticCurveTo(cx, cy, bx, by); ctx.stroke();
+      ctx.strokeStyle = hexA(GOLD, toDest ? 0.55 : 0.9); ctx.lineWidth = this.px(toDest ? 1.3 : 1.7);
+      ctx.setLineDash(toDest ? [this.px(1.5), this.px(5)] : [this.px(7), this.px(5)]);
+      ctx.lineDashOffset = -this.clock * this.px(6);
+      ctx.beginPath(); ctx.moveTo(ax, ay); ctx.quadraticCurveTo(cx, cy, bx, by); ctx.stroke();
+      ctx.setLineDash([]); ctx.lineDashOffset = 0;
+      // The arrowhead at the leg's end, along the curve.
+      const u = 0.98, m = 1 - u;
+      const t = { x: m * m * ax + 2 * m * u * cx + u * u * bx, y: m * m * ay + 2 * m * u * cy + u * u * by };
+      const gx = 2 * m * (cx - ax) + 2 * u * (bx - cx), gy = 2 * m * (cy - ay) + 2 * u * (by - cy), gl = Math.hypot(gx, gy) || 1;
+      const vx = gx / gl, vy = gy / gl, ah = this.px(8), aw = this.px(4.2);
+      ctx.beginPath(); ctx.moveTo(t.x, t.y);
+      ctx.lineTo(t.x - vx * ah - vy * aw, t.y - vy * ah + vx * aw);
+      ctx.lineTo(t.x - vx * ah * 0.6, t.y - vy * ah * 0.6);
+      ctx.lineTo(t.x - vx * ah + vy * aw, t.y - vy * ah - vx * aw);
+      ctx.closePath(); ctx.fillStyle = hexA(GOLD, toDest ? 0.6 : 0.95); ctx.fill();
+    }
+    // A ring on each ticket the path runs through.
+    for (const p of pts.slice(1)) {
+      if (p.kind !== "ticket") continue;
+      ctx.strokeStyle = hexA(GOLD, 0.7); ctx.lineWidth = this.px(1.2);
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, TAU); ctx.stroke();
+    }
+    ctx.globalAlpha = this.mapAlpha;
+  }
+
+  // The destination: a bright violet-white star out past the rim, with long thin cross spikes,
+  // finer diagonal rays and a few faint rings round it, like a navigation mark. It holds still;
+  // painted once into a sprite DEST_R world units in radius.
+  private paintDest() {
+    const R = DEST_R, k = 3, c = document.createElement("canvas");
+    c.width = c.height = Math.ceil(R * 2 * k);
+    const ctx = c.getContext("2d")!;
+    ctx.scale(k, k);
+    ctx.translate(R, R);
+    // Rings: an inner solid one, a dashed one, and an outer dotted one with ticks at the
+    // compass points.
+    ctx.lineWidth = 0.6;
+    ctx.strokeStyle = "rgba(190,170,255,0.22)";
+    ctx.beginPath(); ctx.arc(0, 0, 44, 0, TAU); ctx.stroke();
+    ctx.strokeStyle = "rgba(170,150,255,0.16)"; ctx.setLineDash([5, 4]);
+    ctx.beginPath(); ctx.arc(0, 0, 68, 0, TAU); ctx.stroke();
+    ctx.setLineDash([0.8, 5]); ctx.lineCap = "round"; ctx.lineWidth = 1.1;
+    ctx.strokeStyle = "rgba(170,150,255,0.2)";
+    ctx.beginPath(); ctx.arc(0, 0, 92, 0, TAU); ctx.stroke();
+    ctx.setLineDash([]); ctx.lineWidth = 0.7; ctx.strokeStyle = "rgba(190,170,255,0.28)";
+    for (let i = 0; i < 4; i++) {
+      const t = (i * TAU) / 4 + Math.PI / 4;
+      ctx.beginPath(); ctx.moveTo(Math.cos(t) * 88, Math.sin(t) * 88); ctx.lineTo(Math.cos(t) * 96, Math.sin(t) * 96); ctx.stroke();
+    }
+    ctx.globalCompositeOperation = "lighter";
+    // The bloom.
+    const bloom = ctx.createRadialGradient(0, 0, 0, 0, 0, 62);
+    bloom.addColorStop(0, "rgba(220,200,255,0.75)"); bloom.addColorStop(0.18, "rgba(170,120,255,0.35)");
+    bloom.addColorStop(0.5, "rgba(120,80,230,0.1)"); bloom.addColorStop(1, "rgba(100,60,220,0)");
+    ctx.fillStyle = bloom; ctx.beginPath(); ctx.arc(0, 0, 62, 0, TAU); ctx.fill();
+    // A spike: a long thin lozenge, white at the core fading to violet and nothing at the tip.
+    const spike = (angle: number, len: number, w: number, al: number) => {
+      ctx.save(); ctx.rotate(angle);
+      const g = ctx.createLinearGradient(0, 0, len, 0);
+      g.addColorStop(0, `rgba(255,255,255,${al})`); g.addColorStop(0.25, `rgba(214,190,255,${al * 0.8})`);
+      g.addColorStop(0.6, `rgba(160,110,255,${al * 0.35})`); g.addColorStop(1, "rgba(140,90,255,0)");
+      ctx.fillStyle = g;
+      ctx.beginPath(); ctx.moveTo(0, -w); ctx.quadraticCurveTo(len * 0.12, -w * 0.25, len, 0);
+      ctx.quadraticCurveTo(len * 0.12, w * 0.25, 0, w); ctx.closePath(); ctx.fill();
+      ctx.restore();
+    };
+    // The cross, a little taller than wide; fine diagonals; fainter rays between.
+    spike(-Math.PI / 2, 104, 3.4, 1); spike(Math.PI / 2, 104, 3.4, 1);
+    spike(0, 92, 3.2, 1); spike(Math.PI, 92, 3.2, 1);
+    for (let i = 0; i < 4; i++) spike(Math.PI / 4 + (i * Math.PI) / 2, 40, 1.2, 0.55);
+    for (let i = 0; i < 8; i++) spike(Math.PI / 8 + (i * Math.PI) / 4, 26, 0.7, 0.3);
+    // The core.
+    const core = ctx.createRadialGradient(0, 0, 0, 0, 0, 13);
+    core.addColorStop(0, "rgba(255,255,255,1)"); core.addColorStop(0.35, "rgba(255,255,255,0.9)");
+    core.addColorStop(0.7, "rgba(210,185,255,0.4)"); core.addColorStop(1, "rgba(180,140,255,0)");
+    ctx.fillStyle = core; ctx.beginPath(); ctx.arc(0, 0, 13, 0, TAU); ctx.fill();
+    return c;
+  }
+
+  private drawDest() {
+    const d = this.dest;
+    if (!d) return;
+    const ctx = this.ctx, hi = this.hover?.kind === "dest" ? 1 : 0, R = DEST_R;
+    const sprite = (this.destSprite ??= this.paintDest());
+    ctx.globalAlpha = this.mapAlpha * (0.88 + 0.12 * hi);
+    ctx.drawImage(sprite, d.x - R, d.y - R, R * 2, R * 2);
+    if (hi) {
+      ctx.strokeStyle = "rgba(210,190,255,0.45)"; ctx.lineWidth = this.px(1.2);
+      ctx.beginPath(); ctx.arc(d.x, d.y, 44, 0, TAU); ctx.stroke();
+    }
+    ctx.globalAlpha = this.mapAlpha;
+  }
+
+  // Why a gold slice is waiting on you, in a few words.
+  private youWhy(sn: SNode) {
+    const owner = sn.checks.filter((c) => c.open && c.kind === "owner");
+    if (sn.state === "human") return "Waiting on you: needs a person";
+    return owner.length === 1 ? `Waiting on you: check #${owner[0].num}` : `Waiting on you: ${owner.length} checks`;
+  }
+
+  // What a slice's label says under its number.
+  private sliceStatus(sn: SNode) {
+    const size = sn.size ? ` (${sn.size.toUpperCase()})` : "";
+    return {
+      you: this.youWhy(sn), stalled: `Stalled${size}`, ready: `Ready${size}`, building: `Building${size}`,
+      blocked: "Blocked", built: "Built · checks open", dropped: "Dropped",
+    }[sn.look];
+  }
+
+  // Slice labels, in screen space. The number once its planet is a fair size, with its status
+  // when it's waiting on you or stalled; zoomed in (or in focus), the title, the status and
+  // what it frees. The first step of the recommended path is always labelled while shown. They
+  // yield to the tickets' labels already placed.
+  private drawSliceLabels(a: number, placed: { x: number; y: number; w: number; h?: number }[], fs: number) {
+    const ctx = this.ctx, s = this.cam.s, start = this.att.path[0];
     for (const sn of this.slices) {
-      const focus = sn.emph > 0.5 || sn === this.selectedSlice;
-      if (sn.vis < 0.6 || (!focus && s < 0.7)) continue;
-      const p = this.w2s(sn), lx = p.x + SLICE_H * s + 6, ly = p.y + SLICE_H * s * 0.6 + 6;
+      if (sn.dust || sn.vis < 0.6) continue;
+      const focus = sn.emph > 0.5 || sn === this.selectedSlice || (this.labels && start?.kind === "slice" && start.num === sn.num);
+      const loud = sn.look === "you" || sn.look === "stalled";
+      if (!focus && (!this.labels || (!loud && s < 0.7))) continue;
+      const full = focus || s >= 1.05, un = this.att.unlocks[sn.num] ?? 0;
+      const p = this.w2s(sn), r = this.sliceR(sn) * s + (sn.look === "you" ? 6.5 * Math.min(1, s) : 0);
+      const lx = p.x + r + 8, lh = fs + 3;
+      const title = full ? "  " + (sn.title.length > 28 ? sn.title.slice(0, 27) + "…" : sn.title) : "";
+      const lines: { text: string; col: string; font: string }[] = [];
+      if (full || loud) lines.push({ text: this.sliceStatus(sn), col: statusCol(sn.look), font: `${(fs - 1.5).toFixed(1)}px` });
+      if (full && un > 0) lines.push({ text: `unlocks ${un}`, col: "#9aa6bd", font: `${(fs - 1.5).toFixed(1)}px` });
       const num = `#${sn.num}`;
-      const title = focus ? "  " + (sn.title.length > 40 ? sn.title.slice(0, 39) + "…" : sn.title) : "";
-      ctx.font = `600 ${(fs - 1).toFixed(1)}px ui-sans-serif,system-ui,sans-serif`;
+      ctx.font = `600 ${(fs - 0.5).toFixed(1)}px ui-sans-serif,system-ui,sans-serif`;
       const nw = ctx.measureText(num).width;
-      ctx.font = `${(fs - 1.5).toFixed(1)}px ui-sans-serif,system-ui,sans-serif`;
-      const w = nw + (title ? ctx.measureText(title).width : 0), h = fs;
-      if (!focus && placed.some((q) => lx < q.x + q.w + 4 && lx + w + 4 > q.x && Math.abs(ly - q.y) < h)) continue;
-      placed.push({ x: lx, y: ly, w });
+      ctx.font = `${(fs - 1).toFixed(1)}px ui-sans-serif,system-ui,sans-serif`;
+      let w = nw + (title ? ctx.measureText(title).width : 0);
+      for (const l of lines) { ctx.font = `${l.font} ui-sans-serif,system-ui,sans-serif`; w = Math.max(w, ctx.measureText(l.text).width); }
+      const h = lh * (1 + lines.length), ly = p.y - (h - lh) / 2;
+      const hit = (q: { x: number; y: number; w: number; h?: number }) =>
+        lx < q.x + q.w + 4 && lx + w + 4 > q.x && ly - lh / 2 < q.y - (q.h ?? lh) / 2 + (q.h ?? lh) && ly - lh / 2 + h > q.y - (q.h ?? lh) / 2;
+      if (!focus && placed.some(hit)) continue;
+      placed.push({ x: lx, y: ly - lh / 2 + h / 2, w, h });
       const al = a * sn.vis * (1 - 0.7 * sn.dim);
-      ctx.font = `600 ${(fs - 1).toFixed(1)}px ui-sans-serif,system-ui,sans-serif`;
-      ctx.fillStyle = hexA(SCOL[sn.state] === SCOL.dropped ? "#8a8496" : "#dfe6f2", al);
+      ctx.font = `600 ${(fs - 0.5).toFixed(1)}px ui-sans-serif,system-ui,sans-serif`;
+      ctx.fillStyle = hexA(sn.look === "dropped" ? "#8a8496" : "#e8edf6", al);
       ctx.fillText(num, lx, ly);
       if (title) {
-        ctx.font = `${(fs - 1.5).toFixed(1)}px ui-sans-serif,system-ui,sans-serif`;
-        ctx.fillStyle = `rgba(214,220,232,${al.toFixed(3)})`;
+        ctx.font = `${(fs - 1).toFixed(1)}px ui-sans-serif,system-ui,sans-serif`;
+        ctx.fillStyle = `rgba(222,228,240,${al.toFixed(3)})`;
         ctx.fillText(title, lx + nw, ly);
       }
+      lines.forEach((l, i) => {
+        ctx.font = `${l.font} ui-sans-serif,system-ui,sans-serif`;
+        ctx.fillStyle = hexA(l.col, al);
+        ctx.fillText(l.text, lx, ly + lh * (i + 1));
+      });
     }
   }
 
@@ -1018,6 +1438,7 @@ export class Engine {
     ctx.textAlign = "center"; ctx.textBaseline = "bottom";
     ctx.shadowColor = `rgba(0,0,0,${0.9 * a})`; ctx.shadowBlur = 6;
     for (const c of this.clusters) {
+      if (!this.labels && c.emph < 0.05) continue;
       const p = this.w2s({ x: c.cx, y: c.cy - c.k * CLUSTER_ASPECT.y });
       const t = c.hub.title.length > 30 ? c.hub.title.slice(0, 29) + "…" : c.hub.title;
       ctx.fillStyle = `rgba(236,240,250,${(a * (0.62 + 0.38 * c.emph) * (1 - 0.7 * c.dim)).toFixed(3)})`;
@@ -1141,23 +1562,31 @@ export class Engine {
     }
     // A fold-in's build progress: a ring that fills green as its slices are built.
     const prog = this.progress(n);
-    if (prog) {
-      const [done, all] = prog;
-      const R = c.r * grow + 15;
-      ctx.lineWidth = 2.6; ctx.lineCap = "round";
-      ctx.strokeStyle = "rgba(200,215,255,0.14)";
-      ctx.beginPath(); ctx.arc(x, y, R, 0, TAU); ctx.stroke();
-      if (done) {
-        ctx.strokeStyle = SCOL.built;
-        ctx.beginPath(); ctx.arc(x, y, R, -Math.PI / 2, -Math.PI / 2 + (TAU * done) / Math.max(1, all)); ctx.stroke();
+    if (prog) this.drawProgress(x, y, c.r * grow + 15, prog[0], prog[1]);
+    // While its slices are folded away, pips say one is waiting on you (gold) or has stalled
+    // (rust), so they show from the overview. A fixed size on screen.
+    const kids = this.kids[n.num];
+    if (kids) {
+      const shown = Math.max(0, ...kids.map((k) => k.vis));
+      const pips = [kids.some((k) => k.look === "you") && GOLD, kids.some((k) => k.look === "stalled") && LCOL.stalled].filter(Boolean) as string[];
+      if (pips.length && shown < 0.95) {
+        const k = 1 / this.ec.s, pr = 3.6 * k, R = c.r * grow + 15;
+        ctx.globalAlpha = this.mapAlpha * this.vis(n) * (1 - shown);
+        pips.forEach((pc, i) => {
+          const t = -Math.PI / 4 + i * 0.5, px = x + Math.cos(t) * R, py = y + Math.sin(t) * R;
+          ctx.fillStyle = hexA(pc, 0.35); ctx.beginPath(); ctx.arc(px, py, pr * 2, 0, TAU); ctx.fill();
+          ctx.fillStyle = pc; ctx.beginPath(); ctx.arc(px, py, pr, 0, TAU); ctx.fill();
+        });
+        ctx.globalAlpha = this.mapAlpha * this.vis(n);
       }
-      ctx.lineCap = "butt";
     }
+    // Selected: a thin white ring, outside the build ring when there is one.
     if (this.selected === n) {
-      ctx.strokeStyle = "rgba(255,255,255,0.9)"; ctx.lineWidth = 1.5;
-      ctx.beginPath(); ctx.arc(x, y, c.r * grow + 12, 0, TAU); ctx.stroke();
-      ctx.strokeStyle = "rgba(255,255,255,0.25)"; ctx.lineWidth = 1;
-      ctx.beginPath(); ctx.arc(x, y, c.r * grow + 18, 0, TAU); ctx.stroke();
+      const R = prog ? c.r * grow + 15 + this.px(5) : c.r * grow + 12;
+      ctx.strokeStyle = "rgba(255,255,255,0.9)"; ctx.lineWidth = this.px(1.5);
+      ctx.beginPath(); ctx.arc(x, y, R, 0, TAU); ctx.stroke();
+      ctx.strokeStyle = "rgba(255,255,255,0.25)"; ctx.lineWidth = this.px(1);
+      ctx.beginPath(); ctx.arc(x, y, R + this.px(6), 0, TAU); ctx.stroke();
     }
     ctx.globalAlpha = this.mapAlpha;
   }
@@ -1239,10 +1668,12 @@ export class Engine {
     ctx.shadowColor = `rgba(0,0,0,${(0.9 * a).toFixed(3)})`; ctx.shadowBlur = 5;
     const placed: { x: number; y: number; w: number }[] = [];
     const h = fs + 2, step = h + 2, tries = [0, step, -step, 2 * step, -2 * step];
-    const focus = (n: Node) => n.emph > 0.5 || n === this.selected;
+    const start = this.att.path[0];
+    const focus = (n: Node) => n.emph > 0.5 || n === this.selected || (this.labels && start?.kind === "ticket" && start.num === n.num);
     const order = [...this.nodes].sort((p, q) => Number(focus(q)) - Number(focus(p)) || q.rel - p.rel);
     for (const n of order) {
       const f = focus(n);
+      if (!this.labels && !f) continue;
       if (sparse && !f && n.rel < 0.5 && (n.status === "resolved" || n.status === "out_of_scope")) continue;
       const p = this.w2s(n), num = String(n.num);
       const title = titles || f ? (n.title.length > 40 ? n.title.slice(0, 39) + "…" : n.title) : "";
@@ -1250,7 +1681,7 @@ export class Engine {
       const nw = ctx.measureText(num).width;
       ctx.font = `${(fs - 0.5).toFixed(1)}px ui-sans-serif,system-ui,sans-serif`;
       const tw = title ? ctx.measureText("  " + title).width : 0;
-      const w = nw + tw, off = this.radius(n) * s + 9;
+      const w = nw + tw, off = this.progress(n) ? (COL[n.status].r + 15) * s + 8 : this.radius(n) * s + 9;
       const lx = p.x + off, cy = p.y + off * 0.55;
       let fy: number | null = f ? cy : null;
       if (fy == null) {
@@ -1269,21 +1700,52 @@ export class Engine {
       const prog = this.progress(n);
       if (prog && !title) {
         ctx.font = `600 ${(fs - 1.5).toFixed(1)}px ui-sans-serif,system-ui,sans-serif`;
-        ctx.fillStyle = hexA(SCOL.built, al);
+        ctx.fillStyle = hexA(LCOL.ready, al);
         ctx.fillText(`  ${prog[0]}/${prog[1]}`, lx + nw, fy);
       }
       if (title) {
         ctx.font = `${(fs - 0.5).toFixed(1)}px ui-sans-serif,system-ui,sans-serif`;
         ctx.fillStyle = `rgba(214,220,232,${(al * (f ? 1 : 0.8)).toFixed(3)})`;
         ctx.fillText("  " + title, lx + nw, fy);
+        // An open ticket says what deciding it frees.
+        const un = this.att.unlocks[n.num] ?? 0;
+        if (un > 0 && n.status !== "resolved" && n.status !== "out_of_scope") {
+          ctx.font = `${(fs - 1.5).toFixed(1)}px ui-sans-serif,system-ui,sans-serif`;
+          ctx.fillStyle = hexA("#9aa6bd", al);
+          ctx.fillText(`unlocks ${un}`, lx, fy + h);
+          placed.push({ x: lx, y: fy + h, w: nw + 40 });
+        }
       }
     }
+    if (this.hub && this.labels) {
+      const p = this.w2s(this.hub), loose = this.slices.filter((sn) => sn.parent == null && sn.state !== "dropped");
+      const lx = p.x + (this.hub.r + 16) * s, ly = p.y + (this.hub.r + 16) * s * 0.55;
+      ctx.font = `600 ${fs.toFixed(1)}px ui-sans-serif,system-ui,sans-serif`;
+      ctx.fillStyle = hexA("#dfe6f2", a);
+      ctx.fillText("Build", lx, ly);
+      const bw = ctx.measureText("Build").width;
+      ctx.font = `600 ${(fs - 1.5).toFixed(1)}px ui-sans-serif,system-ui,sans-serif`;
+      ctx.fillStyle = hexA(LCOL.ready, a);
+      ctx.fillText(`  ${loose.filter((sn) => sn.state === "built").length}/${loose.length}`, lx + bw, ly);
+      placed.push({ x: lx, y: ly, w: bw + 40 });
+    }
     this.drawSliceLabels(a, placed, fs);
+    if (this.dest && (this.labels || this.hover?.kind === "dest")) {
+      // In the lower right quadrant, between the spikes.
+      const p = this.w2s(this.dest), lx = p.x + 30 * s + 8, ty = p.y + 26 * s + 6, lh = fs + 4;
+      ctx.font = `600 ${(fs + 2).toFixed(1)}px ui-sans-serif,system-ui,sans-serif`;
+      ctx.fillStyle = hexA("#f1ebff", a);
+      ctx.fillText("Destination", lx, ty);
+      ctx.font = `${fs.toFixed(1)}px ui-sans-serif,system-ui,sans-serif`;
+      ctx.fillStyle = hexA("#d4cbe8", a);
+      this.wrap(this.dest.text, 38).forEach((l, i) => ctx.fillText(l, lx, ty + (i + 1) * lh));
+    }
     if (s >= 0.32 && this.fogPts.length) {
       const ffs = clamp(12 * Math.pow(s, 0.3), 9, 13.5);
       ctx.font = `italic ${ffs.toFixed(1)}px ui-sans-serif,system-ui,sans-serif`;
       ctx.textAlign = "center";
       for (const f of this.fogPts) {
+        if (!this.labels && f.emph < 0.05) continue;
         ctx.fillStyle = `rgba(214,198,248,${(0.9 * a * (1 - 0.6 * f.emph)).toFixed(3)})`;
         const lines = this.wrap(f.title, 20), p = this.w2s(f);
         lines.forEach((l, i) => ctx.fillText(l, p.x, p.y + (i - (lines.length - 1) / 2) * (ffs + 4)));
@@ -1301,7 +1763,8 @@ export class Engine {
     ctx.clearRect(0, 0, W, H);
     let minx = 1e9, miny = 1e9, maxx = -1e9, maxy = -1e9;
     for (const n of this.nodes) { minx = Math.min(minx, n._x); miny = Math.min(miny, n._y); maxx = Math.max(maxx, n._x); maxy = Math.max(maxy, n._y); }
-    for (const f of this.fogPts) { minx = Math.min(minx, f.x); miny = Math.min(miny, f.y); maxx = Math.max(maxx, f.x); maxy = Math.max(maxy, f.y); }
+    const extra = [...this.fogPts, ...(this.dest ? [this.dest] : []), ...(this.hub ? [{ x: this.hub._x, y: this.hub._y }] : [])];
+    for (const f of extra) { minx = Math.min(minx, f.x); miny = Math.min(miny, f.y); maxx = Math.max(maxx, f.x); maxy = Math.max(maxy, f.y); }
     const pad = 8, s = Math.min((W - pad * 2) / (maxx - minx || 1), (H - pad * 2) / (maxy - miny || 1));
     const ox = W / 2 - ((minx + maxx) / 2) * s, oy = H / 2 - ((miny + maxy) / 2) * s;
     mm.box = { x: ox, y: oy, s };
@@ -1315,9 +1778,17 @@ export class Engine {
       ctx.fillStyle = "rgba(150,100,236,0.35)"; ctx.beginPath(); ctx.arc(f.x * s + ox, f.y * s + oy, 4, 0, TAU); ctx.fill();
     }
     for (const sn of this.slices) {
-      if (sn.parent != null) continue;
-      ctx.fillStyle = SCOL[sn.state];
-      ctx.fillRect(sn._x * s + ox - 1.2, sn._y * s + oy - 1.2, 2.4, 2.4);
+      if (sn.dust || (sn.parent != null && sn.look !== "you" && sn.look !== "stalled")) continue;
+      ctx.fillStyle = LCOL[sn.look];
+      ctx.beginPath(); ctx.arc(sn._x * s + ox, sn._y * s + oy, sn.look === "you" ? 2.4 : 1.5, 0, TAU); ctx.fill();
+    }
+    const path = this.pathPoints();
+    if (path.length > 1) {
+      ctx.strokeStyle = hexA(GOLD, 0.85); ctx.lineWidth = 1.2;
+      ctx.beginPath(); path.forEach((p, i) => (i ? ctx.lineTo : ctx.moveTo).call(ctx, p.x * s + ox, p.y * s + oy)); ctx.stroke();
+    }
+    if (this.dest) {
+      ctx.fillStyle = "#e6d8ff"; ctx.beginPath(); ctx.arc(this.dest.x * s + ox, this.dest.y * s + oy, 2.6, 0, TAU); ctx.fill();
     }
     for (const n of this.nodes) {
       ctx.fillStyle = COL[n.status].glow;
@@ -1350,9 +1821,9 @@ export class Engine {
       if (n.enter != null && n.enter < 1) n.enter = Math.min(1, n.enter + dt / 0.55);
     }
     for (const sn of this.slices) {
-      const p = sn.parent != null ? this.byNum[sn.parent] : undefined;
-      sn._x = p ? p._x + sn.ox : sn.x;
-      sn._y = p ? p._y + sn.oy : sn.y;
+      const p = sn.parent != null ? this.byNum[sn.parent] : this.hub;
+      sn._x = (p?._x ?? 0) + sn.ox;
+      sn._y = (p?._y ?? 0) + sn.oy;
     }
     this.measureClusters();
     this.cam.x += (this.goal.x - this.cam.x) * EASE;
@@ -1374,14 +1845,19 @@ export class Engine {
     ctx.translate(this.ec.x, this.ec.y); ctx.scale(this.ec.s, this.ec.s);
     this.drawClusters();
     this.drawFog();
+    this.drawDest();
     // Whatever the hover touches draws last, over its neighbours.
     const up = (i: number) => this.edgeFx[i].emph > 0.01;
     this.edges.forEach((e, i) => { if (!up(i)) this.drawEdge(e, i); });
     const raised = (n: Node) => n.emph > 0.01 || n.rel > 0.01;
     this.nodes.forEach((n) => { if (!raised(n)) this.drawNode(n); });
     this.edges.forEach((e, i) => { if (up(i)) this.drawEdge(e, i); });
+    this.drawPath();
     this.nodes.forEach((n) => { if (raised(n)) this.drawNode(n); });
-    // Slices sit over the stars: their orbits, their blocking edges, then the squares.
+    // Slices sit over the stars: finished work's dust, the hub, the orbits, their blocking
+    // edges, then the planets.
+    this.drawDust();
+    this.drawHub();
     this.drawOrbitsOfSlices();
     this.sliceEdges.forEach((e) => this.drawSliceEdge(e));
     this.slices.forEach((sn) => { if (sn.emph < 0.01) this.drawSlice(sn); });

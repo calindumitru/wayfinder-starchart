@@ -12,6 +12,7 @@ type Props = {
   panelOpen: boolean;
   panelWide: boolean;
   match: Set<number> | null;
+  labels: boolean;
   minimap: HTMLCanvasElement | null;
   fitSignal: number;
   tip: HTMLElement | null;
@@ -28,7 +29,7 @@ const panelSpace = (wide: boolean) => (wide ? Math.min(760, innerWidth * 0.6) : 
 
 // The canvas and its engine. The engine owns the render loop and the camera; React only hands
 // it data and selection.
-export function StarMap({ map, threads, selected, selectedSlice, panelOpen, panelWide, match, minimap, fitSignal, tip, onSelect, onFog, onMoon, onHover, onSlice }: Props) {
+export function StarMap({ map, threads, selected, selectedSlice, panelOpen, panelWide, match, labels, minimap, fitSignal, tip, onSelect, onFog, onMoon, onHover, onSlice }: Props) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const engine = useRef<Engine | null>(null);
   const events = useRef({ onSelect, onFog, onMoon, onHover, onSlice });
@@ -60,6 +61,10 @@ export function StarMap({ map, threads, selected, selectedSlice, panelOpen, pane
   useEffect(() => {
     engine.current?.setMatch(match);
   }, [match]);
+
+  useEffect(() => {
+    engine.current?.setLabels(labels);
+  }, [labels]);
 
   useEffect(() => {
     if (minimap) return engine.current?.attachMinimap(minimap);

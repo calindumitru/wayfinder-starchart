@@ -3,10 +3,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as api from "@/lib/api";
 import type { Hover } from "@/lib/engine";
-import type { BuildSlice, LaunchRequest, MapCheck, MapSpec, MapSummary, Project, SliceState, Status, Thread, Ticket, WayMap } from "@/lib/types";
+import type { BuildSlice, LaunchRequest, MapCheck, MapSpec, MapSummary, Progress, Project, Status, Thread, Ticket, WayMap } from "@/lib/types";
 import * as I from "./Icons";
 import { HoverTip } from "./HoverTip";
-import { Mark, Panel, SLICE_STATE, SliceMark, type Selection } from "./Panel";
+import { Mark, Panel, SLICE_LOOK, SliceMark, type Selection } from "./Panel";
+import { attention, type Attention, type Look } from "@/lib/attention";
 import { SpecReader } from "./SpecReader";
 import { StarMap } from "./StarMap";
 
@@ -62,6 +63,8 @@ export function Starchart() {
   const [fitSignal, setFitSignal] = useState(0);
   const [hover, setHover] = useState<Hover | null>(null);
   const [wide, setWide] = useState(false);
+  // Labels on the map, or only for what's hovered or selected. Remembered between visits.
+  const [labels, setLabels] = useState(() => typeof localStorage === "undefined" || localStorage.getItem("starchart.labels") !== "off");
   const [tip, setTip] = useState<HTMLDivElement | null>(null);
   const [t3Env, setT3Env] = useState<string | null>(null);
   // Reading the spec rather than looking at the stars. Null until the map loads: a closed map
@@ -145,12 +148,58 @@ export function Starchart() {
     );
   }, [repo, mapNum, wantSlices, loadedAt, toast]);
 
+  // The fold-ins with slices still open, or with an open check written from one of their slices,
+  // are read once when the map opens, one after another, so what's waiting on you and the
+  // suggested path show without opening each. A few at most: each read spends from GitHub's
+  // limit on sub-issues.
+  const checked = new Set((raw?.checks ?? []).filter((c) => c.open).map((c) => c.parent));
+  const unfinished = (raw?.tickets ?? [])
+    .filter((t) => t.slices && (t.slices.closed < t.slices.total || checked.has(t.num)))
+    .slice(0, 6)
+    .map((t) => t.num)
+    .join(",");
+  useEffect(() => {
+    if (!repo || mapNum == null || !unfinished) return;
+    let stop = false;
+    (async () => {
+      for (const n of unfinished.split(",").map(Number)) {
+        if (stop) return;
+        try {
+          const list = await api.slices(repo, mapNum, n);
+          if (!stop) setKids((k) => (k[n] ? k : { ...k, [n]: list }));
+        } catch {
+          return;
+        }
+      }
+    })();
+    return () => { stop = true; };
+  }, [repo, mapNum, unfinished]);
+
+  const toggleLabels = useCallback(() => {
+    setLabels((on) => {
+      localStorage.setItem("starchart.labels", on ? "off" : "on");
+      return !on;
+    });
+  }, []);
+  // L toggles the labels, unless you're typing.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key.toLowerCase() !== "l" || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (e.target instanceof Element && e.target.closest("input, textarea, select, [contenteditable]")) return;
+      toggleLabels();
+    };
+    addEventListener("keydown", onKey);
+    return () => removeEventListener("keydown", onKey);
+  }, [toggleLabels]);
+
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 20000);
     return () => clearInterval(t);
   }, []);
 
   // What stays lit: tickets matching the search (number or title) and the legend's status.
+  // What wants attention on the map, worked out again as the clock moves on.
+  const att = useMemo(() => (map ? attention(map, now) : null), [map, now]);
   const match = useMemo(() => {
     const q = query.trim().toLowerCase().replace(/^#/, "");
     if (!map || (!q && !only)) return null;
@@ -229,6 +278,7 @@ export function Starchart() {
         panelOpen={selection != null}
         panelWide={wide}
         match={match}
+        labels={labels}
         minimap={minimap}
         fitSignal={fitSignal}
         tip={tip}
@@ -238,7 +288,7 @@ export function Starchart() {
         onHover={setHover}
       />
 
-      {map && mapNum != null && stars && <HoverTip ref={setTip} map={map} hover={hover} live={liveThreads} canOpenThreads={!!t3Env} />}
+      {map && att && mapNum != null && stars && <HoverTip ref={setTip} map={map} att={att} hover={hover} live={liveThreads} canOpenThreads={!!t3Env} />}
 
       {fatal && <div className="fatal">Can&apos;t reach the starchart server: {fatal}</div>}
 
@@ -280,8 +330,8 @@ export function Starchart() {
         />
       )}
 
-      {map && mapNum != null && stars && (
-        <Legend map={map} live={live.size} only={only} onOnly={(s) => setOnly(only === s ? null : s)} />
+      {map && att && mapNum != null && stars && (
+        <Legend map={map} att={att} live={live.size} only={only} onOnly={(s) => setOnly(only === s ? null : s)} />
       )}
 
       {map && mapNum != null && repo && stars && (
@@ -307,12 +357,14 @@ export function Starchart() {
             onRead={() => { setSelection(null); setReading(true); }}
             onFit={() => { setSelection(null); setFitSignal((n) => n + 1); }}
             onMaps={() => openMap(null)}
+            labels={labels}
+            onLabels={toggleLabels}
           />
           <canvas className="minimap" ref={setMinimap} title="Click to move there" />
         </footer>
       )}
 
-      {map && selection && repo && stars && (
+      {map && att && selection && repo && stars && (
         <Panel
           repo={repo}
           map={map}
@@ -322,6 +374,8 @@ export function Starchart() {
           onSelect={(n) => setSelection({ kind: "ticket", num: n })}
           onSelectSlice={(n) => setSelection({ kind: "slice", num: n })}
           onLaunch={launch}
+          att={att}
+          threadLink={(id) => (t3Env ? `t3code://threads/${t3Env}/${id}` : null)}
           wide={wide}
           onWide={setWide}
         />
@@ -371,7 +425,7 @@ const LEGEND: { status: Status; label: string; hint: string }[] = [
 ];
 
 // The key to the map, with each status's count; click a status to light only those tickets.
-function Legend({ map, live, only, onOnly }: { map: WayMap; live: number; only: Status | null; onOnly: (s: Status) => void }) {
+function Legend({ map, att, live, only, onOnly }: { map: WayMap; att: Attention; live: number; only: Status | null; onOnly: (s: Status) => void }) {
   const count: Record<Status, number> = {
     frontier: map.counts.frontier, claimed: map.counts.claimed, blocked: map.counts.blocked,
     resolved: map.counts.resolved, out_of_scope: map.counts.outOfScope,
@@ -385,33 +439,36 @@ function Legend({ map, live, only, onOnly }: { map: WayMap; live: number; only: 
           <span className="lc">{count[l.status]}</span>
         </button>
       ))}
-      {(map.slices.length > 0 || map.tickets.some((t) => t.slices)) && <SliceLegend map={map} />}
+      {(map.slices.length > 0 || map.tickets.some((t) => t.slices)) && <SliceLegend map={map} att={att} />}
       <div className="lrow static"><Mark status="thread" /> <span className="ll">Active T3 thread</span><span className="lc">{live || ""}</span></div>
       <div className="lrow static"><Mark status="fog" /> <span className="ll">Open question</span><span className="lc">{map.fog.length || ""}</span></div>
       <div className="lbar" title={`${done}% resolved or ruled out`}><span style={{ width: `${done}%` }} /></div>
-      <div className="lhint">drag to pan · scroll to zoom · click a star</div>
+      <div className="lhint">drag to pan · scroll to zoom · click a star · L for labels</div>
     </aside>
   );
 }
 
-const SLICE_ORDER: SliceState[] = ["ready", "building", "blocked", "human", "built"];
+const SLICE_ORDER: Look[] = ["ready", "building", "you", "stalled", "blocked"];
 
-// The build half of the key: slices are squares, filled once built. A ticket's slices are only
-// counted until it's opened, so the states are counted only once every ticket's are loaded.
-function SliceLegend({ map }: { map: WayMap }) {
+// The build half of the key: slices are planets, sized by what they free, and finished ones fold
+// into a ring of dust round their fold-in. A ticket's slices are only counted until it's opened,
+// so the looks are counted only once every ticket's are loaded.
+function SliceLegend({ map, att }: { map: WayMap; att: Attention }) {
   const loose = map.slices.filter((sl) => sl.parent == null);
   const counted = map.tickets.reduce((a, t) => a + (t.slices?.total ?? 0), 0);
   const total = loose.length + counted;
   const closed = loose.filter((sl) => sl.state === "built" || sl.state === "dropped").length
     + map.tickets.reduce((a, t) => a + (t.slices?.closed ?? 0), 0);
   const all = map.slices.length >= total;
-  const n = (st: SliceState) => map.slices.filter((sl) => sl.state === st).length;
+  const n = (lk: Look) => map.slices.filter((sl) => att.looks[sl.num] === lk).length;
   return (
     <>
       <div className="lsep">Build slices <span className="lsepc">{closed}/{total} closed</span></div>
-      {SLICE_ORDER.filter((st) => st !== "human" || n(st) > 0).map((st) => (
-        <div key={st} className="lrow static"><SliceMark state={st} /> <span className="ll">{SLICE_STATE[st]}</span><span className="lc">{all ? n(st) : ""}</span></div>
+      {SLICE_ORDER.filter((lk) => (lk !== "you" && lk !== "stalled") || n(lk) > 0).map((lk) => (
+        <div key={lk} className="lrow static"><SliceMark look={lk} /> <span className="ll">{SLICE_LOOK[lk]}</span><span className="lc">{all || lk === "you" || lk === "stalled" ? n(lk) || "" : ""}</span></div>
       ))}
+      <div className="lrow static"><span className="lmark dust" /> <span className="ll">Built</span> <span className="lh">(in the ring)</span></div>
+      <div className="lrow static"><span className="lmark path" /> <span className="ll">Suggested path</span> <span className="lh">(not a dependency)</span></div>
       {!all && <div className="lhint">open a ticket to see its slices</div>}
     </>
   );
@@ -491,7 +548,9 @@ function ChartButton({ onChart }: { onChart: (idea: string) => Promise<boolean> 
   );
 }
 
-function ViewMenu({ onInfo, onRead, onFit, onMaps }: { onInfo: () => void; onRead: () => void; onFit: () => void; onMaps: () => void }) {
+function ViewMenu({ onInfo, onRead, onFit, onMaps, labels, onLabels }: {
+  onInfo: () => void; onRead: () => void; onFit: () => void; onMaps: () => void; labels: boolean; onLabels: () => void;
+}) {
   const [open, setOpen] = useState(false);
   const close = useCallback(() => setOpen(false), []);
   const ref = useOutside(open, close);
@@ -504,6 +563,9 @@ function ViewMenu({ onInfo, onRead, onFit, onMaps }: { onInfo: () => void; onRea
           {item("Read the spec", onRead)}
           {item("Map details", onInfo)}
           {item("Fit to screen", onFit)}
+          <button className="mitem toggle" role="menuitemcheckbox" aria-checked={labels} onClick={onLabels}>
+            <span className={`tick ${labels ? "on" : ""}`} aria-hidden /> Show labels <kbd>L</kbd>
+          </button>
           {item("All maps", onMaps)}
         </div>
       )}
@@ -523,19 +585,34 @@ function MapList({
 }) {
   const [idea, setIdea] = useState("");
   const [showClosed, setShowClosed] = useState(false);
+  const bar = (label: string, p: Progress, cls: string, none: string) => (
+    <div className={`crow ${cls}`}>
+      <span>{label}</span>
+      {p.total ? (
+        <>
+          <div className="cbar"><span style={{ width: `${Math.round((p.done * 100) / p.total)}%` }} /></div>
+          <span className="cn">{p.done} / {p.total}</span>
+        </>
+      ) : (
+        <span className="cnone">{none}</span>
+      )}
+    </div>
+  );
   const card = (m: MapSummary) => (
-    <div key={m.num} className={`card ${m.open ? "" : "closed"}`} onClick={() => onOpen(m.num)}>
+    <div key={m.num} className={`card ${finished(m) ? "closed" : ""}`} onClick={() => onOpen(m.num)}>
       <div className="cname">{mapName(m.name)}</div>
       <div className="cmeta">
         <span>#{m.num}</span>
-        <span>{m.completed}/{m.total} closed</span>
-        {!m.open && <span>map closed</span>}
+        {!m.open && <span className="ctag">{finished(m) ? "Finished" : "Map closed · still building"}</span>}
       </div>
-      <div className="cbar"><span style={{ width: `${m.total ? Math.round((m.completed * 100) / m.total) : 0}%` }} /></div>
+      {bar("Decisions", m.decisions, "dec", "No tickets yet")}
+      {bar("Building", m.build, "bld", "No slices yet")}
     </div>
   );
-  const open = summaries?.filter((m) => m.open) ?? [];
-  const closed = summaries?.filter((m) => !m.open) ?? [];
+  // A map is put away only once it's closed and every slice of it is closed too.
+  const finished = (m: MapSummary) => !m.open && m.build.done >= m.build.total;
+  const open = summaries?.filter((m) => !finished(m)) ?? [];
+  const closed = summaries?.filter(finished) ?? [];
   return (
     <div id="maplist">
       <div className="listtop">
@@ -560,7 +637,7 @@ function MapList({
       {closed.length > 0 && (
         <>
           <button className="closedtoggle" onClick={() => setShowClosed(!showClosed)}>
-            {showClosed ? "Hide" : "Show"} {closed.length} closed maps
+            {showClosed ? "Hide" : "Show"} {closed.length} finished map{closed.length === 1 ? "" : "s"}
           </button>
           {showClosed && <div className="cards">{closed.map(card)}</div>}
         </>

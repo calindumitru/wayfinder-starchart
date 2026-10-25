@@ -69,9 +69,15 @@ export type BuildSlice = {
   pr: PrRef | null;
   shipped: PrRef | null;
   checks: MapCheck[];
+  // When anything last happened on it (the issue, or the open PR building it), and when it closed.
+  active: string;
+  closedAt: string | null;
 };
 
-export type MapSummary = { num: number; name: string; url: string; open: boolean; total: number; completed: number };
+export type Progress = { done: number; total: number };
+// A map in the list: its decisions closed, and its build slices closed (on the map and its
+// tickets').
+export type MapSummary = { num: number; name: string; url: string; open: boolean; decisions: Progress; build: Progress };
 
 export type Thread = { threadId: string; title: string; status: string; settled: boolean; ticket: number | null };
 

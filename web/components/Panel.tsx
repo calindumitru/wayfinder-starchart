@@ -3,7 +3,8 @@
 import { useState, type ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { BuildSlice, LaunchRequest, SliceState, Status, Thread, Ticket, WayMap } from "@/lib/types";
+import { daysQuiet, look, type Attention, type Look } from "@/lib/attention";
+import type { BuildSlice, LaunchRequest, Status, Thread, Ticket, WayMap } from "@/lib/types";
 import * as I from "./Icons";
 
 export type Selection =
@@ -21,6 +22,9 @@ type Props = {
   onSelect: (num: number) => void;
   onSelectSlice: (num: number) => void;
   onLaunch: (req: LaunchRequest) => Promise<boolean>;
+  att: Attention;
+  // The t3code:// link that opens a thread in the T3 app; null when T3's environment isn't known.
+  threadLink: (threadId: string) => string | null;
   wide: boolean;
   onWide: (wide: boolean) => void;
 };
@@ -29,13 +33,21 @@ const STATUS: Record<Status, string> = {
   frontier: "Frontier", claimed: "Claimed", blocked: "Blocked", resolved: "Resolved", out_of_scope: "Out of scope",
 };
 
-export const SLICE_STATE: Record<SliceState, string> = {
-  ready: "Ready", building: "Building", blocked: "Blocked", human: "Needs a human", built: "Built", dropped: "Dropped",
+export const SLICE_LOOK: Record<Look, string> = {
+  you: "Waiting on you", stalled: "Stalled", ready: "Ready", building: "Building", blocked: "Blocked", built: "Built", dropped: "Dropped",
 };
 
-// A slice's square, as on the map.
-export function SliceMark({ state }: { state: SliceState }) {
-  return <span className={`smark ${state}`} aria-hidden />;
+// A slice's planet, as on the map.
+export function SliceMark({ look }: { look: Look }) {
+  return <span className={`smark ${look}`} aria-hidden />;
+}
+
+// Why a slice looks the way it does, when that needs saying.
+export function lookWhy(sl: BuildSlice, att: Attention): string | null {
+  const lk = att.looks[sl.num] ?? look(sl, att.now);
+  if (lk === "you") return sl.state === "human" ? "A person has to do this (ready-for-human)." : "An owner check on it is open.";
+  if (lk === "stalled") return `Nothing has happened on it, or on its PR, for ${daysQuiet(sl, att.now)} days.`;
+  return null;
 }
 
 // The glyph a status has on the map, for the legend, the panel and the bottom bar; plus a live
@@ -107,16 +119,28 @@ function Deps({ map, ticket, onSelect }: { map: WayMap; ticket: Ticket; onSelect
 }
 
 // What's going on with a ticket right now: its live T3 threads and any claim on it.
-function Notices({ ticket, live }: { ticket: Ticket; live: Thread[] }) {
+// A live T3 thread on a ticket or slice: a link that opens it in the T3 app, when the app's
+// environment is known.
+function LiveThread({ t, link }: { t: Thread; link: string | null }) {
+  const body = (
+    <>
+      <Mark status="thread" /> <span>In T3: {t.title.replace(/^#\d+\s*/, "")}</span> <em>{t.status}</em>
+      {link && <b className="open">Open <I.External size={12} /></b>}
+    </>
+  );
+  return link ? (
+    <a className="live link" href={link} title="Open this thread in the T3 app">{body}</a>
+  ) : (
+    <div className="live" title="T3's environment wasn't found, so the thread can't be opened from here">{body}</div>
+  );
+}
+
+function Notices({ ticket, live, threadLink }: { ticket: Ticket; live: Thread[]; threadLink: Props["threadLink"] }) {
   const open = ticket.status !== "resolved" && ticket.status !== "out_of_scope";
   if (!live.length && !(open && (ticket.status === "claimed" || ticket.staleClaim))) return null;
   return (
     <div className="notices">
-      {live.map((t) => (
-        <div key={t.threadId} className="live">
-          <Mark status="thread" /> <span>In T3: {t.title.replace(/^#\d+\s*/, "")}</span> <em>{t.status}</em>
-        </div>
-      ))}
+      {live.map((t) => <LiveThread key={t.threadId} t={t} link={threadLink(t.threadId)} />)}
       {open && ticket.status === "claimed" && (
         <div className="warn">Claimed by {ticket.assignee}, who has commented on it: someone may be working it.</div>
       )}
@@ -253,24 +277,25 @@ function SliceActions({ repo, map, slice, onLaunch }: { repo: string; map: WayMa
 }
 
 // One slice in a list: its square, number, title, size and state, and its PR when it has one.
-function SliceRow({ sl, onSelect }: { sl: BuildSlice; onSelect: (n: number) => void }) {
+function SliceRow({ sl, att, onSelect }: { sl: BuildSlice; att: Attention; onSelect: (n: number) => void }) {
+  const lk = att.looks[sl.num] ?? look(sl, att.now);
   return (
     <button className="dep slicerow" onClick={() => onSelect(sl.num)} title={sl.title}>
-      <SliceMark state={sl.state} /> <b>{sl.num}</b> <span className="dt">{sl.title}</span>
+      <SliceMark look={lk} /> <b>{sl.num}</b> <span className="dt">{sl.title}</span>
       {sl.size && <span className="size">{sl.size.toUpperCase()}</span>}
-      <span className={`sstate ${sl.state}`}>{SLICE_STATE[sl.state]}</span>
+      <span className={`sstate ${lk}`}>{SLICE_LOOK[lk]}</span>
     </button>
   );
 }
 
 // A fold-in's build: its decisions resolved, its slices built, and the slices themselves.
-function Build({ map, ticket, onSelectSlice }: { map: WayMap; ticket: Ticket; onSelectSlice: (n: number) => void }) {
+function Build({ map, ticket, att, onSelectSlice }: { map: WayMap; ticket: Ticket; att: Attention; onSelectSlice: (n: number) => void }) {
   const kids = map.slices.filter((sl) => sl.parent === ticket.num);
   if (!kids.length) {
     if (!ticket.slices) return null;
     return (
       <section className="psec">
-        <div className="phead">Build <span className="pcount">{ticket.slices.closed} of {ticket.slices.total} closed</span></div>
+        <div className="phead">Build slices <span className="pcount">{ticket.slices.closed} of {ticket.slices.total} closed</span></div>
         <div className="pmute">Reading its slices…</div>
       </section>
     );
@@ -288,15 +313,15 @@ function Build({ map, ticket, onSelectSlice }: { map: WayMap; ticket: Ticket; on
   );
   return (
     <section className="psec">
-      <div className="phead">Build <span className="pcount">{built} of {live.length} built</span></div>
+      <div className="phead">Build slices <span className="pcount" title="The ring round the ticket on the map">{built} of {live.length} built</span></div>
       {blockers.length > 0 && bar("Decisions", decided, blockers.length, "dec")}
       {bar("Slices built", built, live.length, "bld")}
-      <div className="slicelist">{kids.map((sl) => <SliceRow key={sl.num} sl={sl} onSelect={onSelectSlice} />)}</div>
+      <div className="slicelist">{kids.map((sl) => <SliceRow key={sl.num} sl={sl} att={att} onSelect={onSelectSlice} />)}</div>
     </section>
   );
 }
 
-export function Panel({ repo, map, selection, threads, onClose, onSelect, onSelectSlice, onLaunch, wide, onWide }: Props) {
+export function Panel({ repo, map, selection, threads, onClose, onSelect, onSelectSlice, onLaunch, att, threadLink, wide, onWide }: Props) {
   let head: ReactNode = null;
   let body: ReactNode = null;
   let foot: ReactNode = null;
@@ -317,10 +342,10 @@ export function Panel({ repo, map, selection, threads, onClose, onSelect, onSele
     );
     body = (
       <>
-        <Notices ticket={t} live={live} />
+        <Notices ticket={t} live={live} threadLink={threadLink} />
         {t.gist && <div className="lead"><Md text={t.gist} map={map} onSelect={onSelect} /></div>}
         <Deps map={map} ticket={t} onSelect={onSelect} />
-        <Build map={map} ticket={t} onSelectSlice={onSelectSlice} />
+        <Build map={map} ticket={t} att={att} onSelectSlice={onSelectSlice} />
         {t.answer && (
           <section className="psec">
             <div className="phead">{t.status === "out_of_scope" ? "Ruled out" : "Decisions so far"}</div>
@@ -339,14 +364,15 @@ export function Panel({ repo, map, selection, threads, onClose, onSelect, onSele
     if (!sl) return null;
     const parent = sl.parent != null ? map.tickets.find((x) => x.num === sl.parent) : undefined;
     const live = threads.filter((x) => x.ticket === sl.num && !x.settled);
+    const lk = att.looks[sl.num] ?? look(sl, att.now), why = lookWhy(sl, att), frees = att.unlocks[sl.num] ?? 0;
     head = (
       <>
         <div className="ptop">
-          <SliceMark state={sl.state} /> <span className="pnum">{sl.num}</span>
+          <SliceMark look={lk} /> <span className="pnum">{sl.num}</span>
           <span className="ptype">slice</span>
           {sl.size && <span className="size">{sl.size.toUpperCase()}</span>}
           {sl.escalate && <span className="esc" title="A mistake is costly: built by the escalated builder">escalate</span>}
-          <span className={`badge s-${sl.state}`}>{SLICE_STATE[sl.state]}</span>
+          <span className={`badge s-${lk}`}>{SLICE_LOOK[lk]}</span>
         </div>
         <h2>{sl.title}</h2>
       </>
@@ -356,7 +382,7 @@ export function Panel({ repo, map, selection, threads, onClose, onSelect, onSele
         {live.length > 0 && (
           <div className="notices">
             {live.map((th) => (
-              <div key={th.threadId} className="live"><Mark status="thread" /> <span>In T3: {th.title.replace(/^#\d+\s*/, "")}</span> <em>{th.status}</em></div>
+              <LiveThread key={th.threadId} t={th} link={threadLink(th.threadId)} />
             ))}
           </div>
         )}
@@ -366,7 +392,12 @@ export function Panel({ repo, map, selection, threads, onClose, onSelect, onSele
             check before building it again, and close the slice if it&apos;s done.
           </div>
         )}
+        {why && <div className={`lookwhy ${lk}`}>{why}</div>}
         <section className="psec facts">
+          <div className="fact">
+            <span>Unblocks</span>
+            {frees ? <span>{frees} open slice{frees === 1 ? "" : "s"}</span> : <span className="none">Nothing waits on it</span>}
+          </div>
           {parent && (
             <div className="fact"><span>Part of</span> <DepRow t={parent} onSelect={onSelect} /></div>
           )}
@@ -375,7 +406,7 @@ export function Panel({ repo, map, selection, threads, onClose, onSelect, onSele
             <div>
               {sl.blockers.length ? sl.blockers.map((b) => {
                 const other = map.slices.find((x) => x.num === b.num);
-                return other ? <SliceRow key={b.num} sl={other} onSelect={onSelectSlice} /> : (
+                return other ? <SliceRow key={b.num} sl={other} att={att} onSelect={onSelectSlice} /> : (
                   <div key={b.num} className="dep static"><b>#{b.num}</b> <span className="dt">{b.title}</span><span className={`ds ${b.open ? "open" : "done"}`}>{b.open ? "Open" : "Closed"}</span></div>
                 );
               }) : <span className="none">None</span>}

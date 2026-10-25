@@ -4,13 +4,15 @@ import { useState, type Ref } from "react";
 import type { Hover } from "@/lib/engine";
 import type { Status, Thread, Ticket, WayMap } from "@/lib/types";
 import * as I from "./Icons";
-import { Mark, SLICE_STATE, SliceMark } from "./Panel";
+import { look, type Attention } from "@/lib/attention";
+import { Mark, SLICE_LOOK, SliceMark, lookWhy } from "./Panel";
 
 type Props = {
   map: WayMap;
   hover: Hover | null;
   live: Map<number, Thread>;
   canOpenThreads: boolean;
+  att: Attention;
   ref: Ref<HTMLDivElement>;
 };
 
@@ -44,9 +46,17 @@ function standing(t: Ticket, map: WayMap) {
   return { label: label[t.status], deps: total && waiting === 0 ? `${total === 1 ? "1 dependency" : `${total} dependencies`} resolved` : deps };
 }
 
+// A ticket's build slices: built of those not dropped, from its slices once they're loaded, else
+// from its count (where a dropped slice counts as closed). Null when it has none.
+function buildOf(t: Ticket, map: WayMap) {
+  const kids = map.slices.filter((sl) => sl.parent === t.num && sl.state !== "dropped");
+  if (kids.length) return { built: kids.filter((sl) => sl.state === "built").length, total: kids.length };
+  return t.slices ? { built: t.slices.closed, total: t.slices.total } : null;
+}
+
 // The card that explains whatever the pointer is over. The engine positions it and shows or
 // hides it (data-show); this fills it. It keeps the last hover's content while fading out.
-export function HoverTip({ map, hover, live, canOpenThreads, ref }: Props) {
+export function HoverTip({ map, hover, live, canOpenThreads, att, ref }: Props) {
   const [last, setLast] = useState(hover);
   if (hover && hover !== last) setLast(hover);
   const h = hover ?? last;
@@ -55,11 +65,12 @@ export function HoverTip({ map, hover, live, canOpenThreads, ref }: Props) {
   if (h?.kind === "node") {
     const t = map.tickets.find((x) => x.num === h.num);
     if (t) {
-      const st = standing(t, map), preview = plain(t.gist || t.body);
+      const st = standing(t, map), preview = plain(t.gist || t.body), build = buildOf(t, map);
       body = (
         <>
           <div className="th"><Mark status={t.status} /> <span><b>#{t.num}</b> · {clip(t.title, 60)}</span></div>
           <div className="tsub"><span className={`ts ${t.status}`}>{st.label}</span> · {st.deps}</div>
+          {build && <div className="tbuild">Ring: <b>{build.built} of {build.total}</b> build slices built</div>}
           {preview && <p>{clip(preview, 160)}</p>}
           <div className="tfoot"><I.Pointer size={14} /> Click to inspect ticket</div>
         </>
@@ -106,16 +117,19 @@ export function HoverTip({ map, hover, live, canOpenThreads, ref }: Props) {
       const parent = sl.parent != null ? map.tickets.find((x) => x.num === sl.parent) : undefined;
       const open = sl.checks.filter((c) => c.open);
       const waiting = sl.blockers.filter((b) => b.open).map((b) => `#${b.num}`);
+      const lk = att.looks[sl.num] ?? look(sl, att.now), why = lookWhy(sl, att), frees = att.unlocks[sl.num] ?? 0;
       body = (
         <>
-          <div className="th"><SliceMark state={sl.state} /> <span><b>#{sl.num}</b> · {clip(sl.title, 60)}</span></div>
+          <div className="th"><SliceMark look={lk} /> <span><b>#{sl.num}</b> · {clip(sl.title, 60)}</span></div>
           <div className="tsub">
-            <span className={`ss ${sl.state}`}>{SLICE_STATE[sl.state]}</span>
+            <span className={`ss ${lk}`}>{SLICE_LOOK[lk]}</span>
+            {frees > 0 && <> · unlocks {frees}</>}
             {sl.size && <> · size {sl.size.toUpperCase()}</>}
             {sl.escalate && <> · escalate</>}
             {sl.pr && <> · PR #{sl.pr.num} {sl.pr.merged ? "merged" : "open"}</>}
             {waiting.length > 0 && <> · waits on {waiting.join(", ")}</>}
           </div>
+          {why && <p className={`twhy ${lk}`}>{why}</p>}
           {parent && <p>Part of {clip(parent.title, 70)}</p>}
           {sl.shipped && <p className="twarn">A merged PR (#{sl.shipped.num}) names it as its own.</p>}
           {open.length > 0 && (
@@ -127,6 +141,33 @@ export function HoverTip({ map, hover, live, canOpenThreads, ref }: Props) {
         </>
       );
     }
+  } else if (h?.kind === "dust") {
+    const kids = map.slices.filter((sl) => (h.anchor < 0 ? sl.parent == null : sl.parent === h.anchor) && sl.state === "built");
+    const t = map.tickets.find((x) => x.num === h.anchor);
+    const count = kids.length || t?.slices?.closed || 0;
+    body = (
+      <>
+        <div className="th"><span className="smark built" /> {count} built slice{count === 1 ? "" : "s"}{t ? <> of #{t.num}</> : " on the map"}</div>
+        {kids.length > 0 ? (
+          <ul className="tdust">
+            {kids.slice(0, 8).map((sl) => <li key={sl.num}><b>#{sl.num}</b> {clip(sl.title, 46)}</li>)}
+            {kids.length > 8 && <li className="more">and {kids.length - 8} more</li>}
+          </ul>
+        ) : <p>Open the ticket to read them.</p>}
+      </>
+    );
+  } else if (h?.kind === "dest") {
+    body = (
+      <>
+        <div className="tkind dest">Destination</div>
+        <div className="ttitle">{map.name}</div>
+        {map.destination && <p>{clip(plain(map.destination), 300)}</p>}
+        <div className="tsub">
+          Still open on this map: {att.open.decisions} decision{att.open.decisions === 1 ? "" : "s"} and {att.open.slices} build slice{att.open.slices === 1 ? "" : "s"}.
+          The gold path is a suggested route here, not a dependency.
+        </div>
+      </>
+    );
   } else if (h?.kind === "cluster") {
     const hub = map.tickets.find((x) => x.num === h.hub);
     const members = map.tickets.filter((x) => h.members.includes(x.num));

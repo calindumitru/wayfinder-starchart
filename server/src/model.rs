@@ -36,6 +36,9 @@ pub struct RawIssue {
     pub labels: Vec<String>,
     pub blocked_by: Vec<RawRef>,
     pub comments: Vec<RawComment>,
+    /// When it last changed, and when it was closed (ISO 8601).
+    pub updated_at: String,
+    pub closed_at: Option<String>,
     /// How many sub-issues (build slices) it has, and how many of them are closed.
     pub sub_total: u32,
     pub sub_closed: u32,
@@ -50,6 +53,7 @@ pub struct RawPr {
     pub open: bool,
     pub merged: bool,
     pub body: String,
+    pub updated_at: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -202,6 +206,9 @@ pub struct Slice {
     /// A merged PR already names this open slice: it may have shipped, so check before building.
     pub shipped: Option<PrRef>,
     pub checks: Vec<Check>,
+    /// When anything last happened on it: the issue, or the open PR building it (ISO 8601).
+    pub active: String,
+    pub closed_at: Option<String>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -285,12 +292,16 @@ pub fn check(number: u32, title: &str, url: &str, open: bool, labels: &[String],
 
 fn slice(t: &RawIssue, parent: Option<u32>, checks: &[Check]) -> Slice {
     let commented = t.comments.iter().any(|c| t.assignees.contains(&c.author));
-    let prs: Vec<(u32, &String, bool, bool)> = t
-        .xrefs
+    let own: Vec<&RawPr> = t.xrefs.iter().filter(|p| names_as_own(&p.body, t.number)).collect();
+    let active = own
         .iter()
-        .filter(|p| names_as_own(&p.body, t.number))
-        .map(|p| (p.number, &p.url, p.open, p.merged))
-        .collect();
+        .filter(|p| p.open)
+        .map(|p| &p.updated_at)
+        .chain([&t.updated_at])
+        .max()
+        .cloned()
+        .unwrap_or_default();
+    let prs: Vec<(u32, &String, bool, bool)> = own.iter().map(|p| (p.number, &p.url, p.open, p.merged)).collect();
     let pr_ref = |p: &(u32, &String, bool, bool)| PrRef {
         num: p.0,
         url: p.1.clone(),
@@ -340,6 +351,8 @@ fn slice(t: &RawIssue, parent: Option<u32>, checks: &[Check]) -> Slice {
         shipped: if t.open { merged_pr } else { None },
         checks,
         state,
+        active,
+        closed_at: t.closed_at.clone(),
     }
 }
 
@@ -698,7 +711,37 @@ mod tests {
             open,
             merged: !open,
             body: body.into(),
+            updated_at: String::new(),
         }
+    }
+
+    #[test]
+    fn a_slice_was_last_active_when_it_or_its_open_pr_last_changed() {
+        let at = |issue: &str, prs: &[(bool, &str)]| {
+            let t = RawIssue {
+                updated_at: issue.into(),
+                xrefs: prs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (open, when))| RawPr {
+                        updated_at: (*when).into(),
+                        ..pr(i as u32 + 1, *open, "Slice #5")
+                    })
+                    .collect(),
+                ..slice_issue(5, &["ready-for-agent"])
+            };
+            slice(&t, None, &[]).active
+        };
+        assert_eq!(at("2026-10-01T00:00:00Z", &[]), "2026-10-01T00:00:00Z");
+        assert_eq!(
+            at("2026-10-01T00:00:00Z", &[(true, "2026-10-04T00:00:00Z")]),
+            "2026-10-04T00:00:00Z"
+        );
+        // A merged PR is history, not activity.
+        assert_eq!(
+            at("2026-10-01T00:00:00Z", &[(false, "2026-10-04T00:00:00Z")]),
+            "2026-10-01T00:00:00Z"
+        );
     }
 
     #[test]
