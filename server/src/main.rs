@@ -4,6 +4,7 @@
 mod github;
 mod http;
 mod model;
+mod spec;
 mod t3;
 
 use anyhow::{Result, bail};
@@ -32,6 +33,12 @@ struct Args {
     /// Another Host to accept, such as the Next dev server's `localhost:3000`.
     #[arg(long = "allow-host")]
     allow_hosts: Vec<String>,
+    /// The spec file a closed map's reader shows the changed sections of.
+    #[arg(long, default_value = "SPEC.md")]
+    spec: String,
+    /// The glossary file shown alongside the spec.
+    #[arg(long, default_value = "CONTEXT.md")]
+    glossary: String,
 }
 
 fn default_t3() -> String {
@@ -69,16 +76,19 @@ async fn main() -> Result<()> {
         .collect();
     let mut hosts = vec![format!("127.0.0.1:{}", args.port), format!("localhost:{}", args.port)];
     hosts.extend(args.allow_hosts);
-    let app = Arc::new(http::App::new(
-        projects,
-        token,
-        hosts,
-        github::GitHub { gh: args.gh },
-        t3::T3 {
-            bin: args.t3.unwrap_or_else(default_t3),
-            worktree_base: args.worktree_base,
-        },
-    ));
+    let app = Arc::new(
+        http::App::new(
+            projects,
+            token,
+            hosts,
+            github::GitHub { gh: args.gh },
+            t3::T3 {
+                bin: args.t3.unwrap_or_else(default_t3),
+                worktree_base: args.worktree_base,
+            },
+        )
+        .with_docs(args.spec, args.glossary),
+    );
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", args.port)).await?;
     println!("wayfinder-starchart: http://127.0.0.1:{}", args.port);
     axum::serve(listener, http::router(app)).await?;

@@ -4,7 +4,7 @@ import { useState, type Ref } from "react";
 import type { Hover } from "@/lib/engine";
 import type { Status, Thread, Ticket, WayMap } from "@/lib/types";
 import * as I from "./Icons";
-import { Mark } from "./Panel";
+import { Mark, SLICE_STATE, SliceMark } from "./Panel";
 
 type Props = {
   map: WayMap;
@@ -97,6 +97,33 @@ export function HoverTip({ map, hover, live, canOpenThreads, ref }: Props) {
           <div className="tkind fog"><Mark status="fog" /> Open question</div>
           <div className="ttitle">{f.title}</div>
           {f.text && <p>{clip(plain(f.text), 320)}</p>}
+        </>
+      );
+    }
+  } else if (h?.kind === "slice") {
+    const sl = map.slices.find((x) => x.num === h.num);
+    if (sl) {
+      const parent = sl.parent != null ? map.tickets.find((x) => x.num === sl.parent) : undefined;
+      const open = sl.checks.filter((c) => c.open);
+      const waiting = sl.blockers.filter((b) => b.open).map((b) => `#${b.num}`);
+      body = (
+        <>
+          <div className="th"><SliceMark state={sl.state} /> <span><b>#{sl.num}</b> · {clip(sl.title, 60)}</span></div>
+          <div className="tsub">
+            <span className={`ss ${sl.state}`}>{SLICE_STATE[sl.state]}</span>
+            {sl.size && <> · size {sl.size.toUpperCase()}</>}
+            {sl.escalate && <> · escalate</>}
+            {sl.pr && <> · PR #{sl.pr.num} {sl.pr.merged ? "merged" : "open"}</>}
+            {waiting.length > 0 && <> · waits on {waiting.join(", ")}</>}
+          </div>
+          {parent && <p>Part of {clip(parent.title, 70)}</p>}
+          {sl.shipped && <p className="twarn">A merged PR (#{sl.shipped.num}) names it as its own.</p>}
+          {open.length > 0 && (
+            <div className="tchecks">
+              {open.map((c) => <span key={c.num}><span className={`flag ${c.kind}`} /> {c.kind} check{c.due ? `, due ${clip(c.due, 40)}` : ""}</span>)}
+            </div>
+          )}
+          <div className="tfoot"><I.Pointer size={14} /> Click to inspect slice</div>
         </>
       );
     }

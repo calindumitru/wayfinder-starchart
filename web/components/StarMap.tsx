@@ -8,6 +8,7 @@ type Props = {
   map: WayMap | null;
   threads: Map<number, string>;
   selected: number | null;
+  selectedSlice: number | null;
   panelOpen: boolean;
   panelWide: boolean;
   match: Set<number> | null;
@@ -18,6 +19,7 @@ type Props = {
   onFog: (index: number) => void;
   onMoon: (num: number) => void;
   onHover: (h: Hover | null) => void;
+  onSlice: (num: number) => void;
 };
 
 // The space the floating panel takes from the right edge: its width (globals.css #panel and
@@ -26,13 +28,13 @@ const panelSpace = (wide: boolean) => (wide ? Math.min(760, innerWidth * 0.6) : 
 
 // The canvas and its engine. The engine owns the render loop and the camera; React only hands
 // it data and selection.
-export function StarMap({ map, threads, selected, panelOpen, panelWide, match, minimap, fitSignal, tip, onSelect, onFog, onMoon, onHover }: Props) {
+export function StarMap({ map, threads, selected, selectedSlice, panelOpen, panelWide, match, minimap, fitSignal, tip, onSelect, onFog, onMoon, onHover, onSlice }: Props) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const engine = useRef<Engine | null>(null);
-  const events = useRef({ onSelect, onFog, onMoon, onHover });
+  const events = useRef({ onSelect, onFog, onMoon, onHover, onSlice });
 
   useEffect(() => {
-    events.current = { onSelect, onFog, onMoon, onHover };
+    events.current = { onSelect, onFog, onMoon, onHover, onSlice };
   });
 
   useEffect(() => {
@@ -41,6 +43,7 @@ export function StarMap({ map, threads, selected, panelOpen, panelWide, match, m
       onFog: (i) => events.current.onFog(i),
       onMoon: (n) => events.current.onMoon(n),
       onHover: (h) => events.current.onHover(h),
+      onSlice: (n) => events.current.onSlice(n),
     });
     engine.current = e;
     return () => e.destroy();
@@ -73,6 +76,10 @@ export function StarMap({ map, threads, selected, panelOpen, panelWide, match, m
   useEffect(() => {
     engine.current?.select(selected, panelOpen ? panelSpace(panelWide) : 0);
   }, [selected, panelOpen, panelWide, map]);
+
+  useEffect(() => {
+    engine.current?.selectSlice(selectedSlice, panelOpen ? panelSpace(panelWide) : 0);
+  }, [selectedSlice, panelOpen, panelWide, map]);
 
   return <canvas id="sky" ref={canvas} />;
 }

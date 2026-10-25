@@ -2,7 +2,7 @@
 //! it didn't build: a launch names an action and a ticket on a loaded map, and the prompt is a
 //! fixed template around them (the user's note, when there is one, is quoted as theirs).
 
-use crate::model::Map;
+use crate::model::{Map, SliceState};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -21,6 +21,8 @@ pub enum Kind {
     Ask,
     /// `/wayfinder <idea>`: chart a new map.
     Chart,
+    /// `/slice-flow <slice>`: build a slice up to a reviewed, merged PR.
+    Build,
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -30,6 +32,9 @@ pub struct LaunchRequest {
     pub kind: Kind,
     pub map: Option<u32>,
     pub ticket: Option<u32>,
+    /// For a slice under a ticket, that ticket: the slices a map carries are only its own.
+    #[serde(default)]
+    pub parent: Option<u32>,
     #[serde(default)]
     pub note: String,
     #[serde(default)]
@@ -82,6 +87,15 @@ fn with_note(mut message: String, note: &str) -> String {
     message
 }
 
+/// A question about a ticket or slice, for a session that reads and changes nothing.
+fn ask_message(map_name: &str, map_url: &str, what: &str, title: &str, url: &str, note: &str) -> String {
+    format!(
+        "Read the wayfinder map {map_name} ({map_url}) and its {what} {title} ({url}), with its comments. \
+Don't claim, comment on, close or edit anything unless I ask you to. Then answer this:\n\n{}",
+        note.lines().map(|l| format!("> {l}")).collect::<Vec<_>>().join("\n")
+    )
+}
+
 /// The thread to start for a request, checked against the map it names. A ticket's thread is
 /// titled `#<n> <title>` so starchart can find it again in `t3 thread list`.
 pub fn plan(req: &LaunchRequest, map: Option<&Map>) -> Result<Launch> {
@@ -109,6 +123,36 @@ pub fn plan(req: &LaunchRequest, map: Option<&Map>) -> Result<Launch> {
             branch: None,
         });
     }
+    if req.kind == Kind::Build {
+        let Some(sl) = req.ticket.and_then(|n| map.slice(n)) else {
+            bail!("that slice isn't on this map")
+        };
+        match sl.state {
+            SliceState::Built | SliceState::Dropped => bail!("that slice is closed"),
+            SliceState::Human => bail!("that slice needs a human first"),
+            SliceState::Blocked => bail!("that slice is blocked"),
+            SliceState::Building => bail!("that slice is already being built"),
+            SliceState::Ready => {}
+        }
+        return Ok(Launch {
+            title: clip(&format!("#{} {}", sl.num, sl.title), 80),
+            message: with_note(format!("/slice-flow {}", sl.url), note),
+            branch: None,
+        });
+    }
+    // Ask works on a slice as well as a ticket; everything else needs a ticket.
+    if req.kind == Kind::Ask
+        && let Some(sl) = req.ticket.and_then(|n| map.slice(n))
+    {
+        if note.is_empty() {
+            bail!("asking needs a question");
+        }
+        return Ok(Launch {
+            title: clip(&format!("#{} {}", sl.num, sl.title), 80),
+            message: ask_message(&map.name, &map.url, "build slice", &sl.title, &sl.url, note),
+            branch: None,
+        });
+    }
     let Some(t) = req.ticket.and_then(|n| map.ticket(n)) else {
         bail!("that ticket isn't on this map")
     };
@@ -130,19 +174,11 @@ pub fn plan(req: &LaunchRequest, map: Option<&Map>) -> Result<Launch> {
             }
             Ok(Launch {
                 title,
-                message: format!(
-                    "Read the wayfinder map {} ({}) and its ticket {} ({}), with its comments. \
-Don't claim, comment on, close or edit anything unless I ask you to. Then answer this:\n\n{}",
-                    map.name,
-                    map.url,
-                    t.title,
-                    t.url,
-                    note.lines().map(|l| format!("> {l}")).collect::<Vec<_>>().join("\n")
-                ),
+                message: ask_message(&map.name, &map.url, "ticket", &t.title, &t.url, note),
                 branch: None,
             })
         }
-        Kind::Next | Kind::Chart => unreachable!("handled above"),
+        Kind::Next | Kind::Chart | Kind::Build => unreachable!("handled above"),
     }
 }
 
@@ -243,7 +279,7 @@ impl T3 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{self, RawIssue};
+    use crate::model::{self, RawIssue, RawPr};
     use serde_json::json;
 
     fn map() -> Map {
@@ -265,6 +301,7 @@ mod tests {
                 ticket(2, "Which colour should the button be?", true),
                 ticket(3, "Done already", false),
             ],
+            &[],
         )
     }
     fn req(kind: Kind, ticket: Option<u32>, note: &str) -> LaunchRequest {
@@ -273,6 +310,7 @@ mod tests {
             kind,
             map: Some(1),
             ticket,
+            parent: None,
             note: note.into(),
             worktree: false,
         }
@@ -318,6 +356,57 @@ mod tests {
         let l = plan(&req(Kind::Ask, Some(3), "Why?"), Some(&map())).unwrap();
         assert!(l.message.contains("Don't claim"));
         assert!(l.message.ends_with("> Why?"));
+    }
+
+    #[test]
+    fn build_starts_slice_flow_only_on_a_ready_slice() {
+        let sl = |number: u32, pr: Option<(u32, bool)>| RawIssue {
+            number,
+            title: format!("Slice {number}"),
+            url: format!("https://github.com/o/r/issues/{number}"),
+            open: true,
+            labels: vec!["ready-for-agent".into()],
+            xrefs: pr
+                .map(|(n, open)| RawPr {
+                    number: n,
+                    url: "p".into(),
+                    open,
+                    merged: !open,
+                    body: format!("Slice #{number}"),
+                })
+                .into_iter()
+                .collect(),
+            ..RawIssue::default()
+        };
+        let fold = RawIssue {
+            number: 2,
+            title: "Fold it in".into(),
+            url: "https://github.com/o/r/issues/2".into(),
+            ..RawIssue::default()
+        };
+        let mut m = model::build(
+            RawIssue {
+                number: 1,
+                title: "Wayfinder: A map".into(),
+                url: "https://github.com/o/r/issues/1".into(),
+                ..RawIssue::default()
+            },
+            vec![fold],
+            &[],
+        );
+        // A ticket's slices come on their own; the launch adds them to the map it reads.
+        let subs = [sl(10, None), sl(11, Some((40, true))), sl(12, Some((41, false)))];
+        m.slices.extend(model::slices_of(2, &subs, &[]));
+        let l = plan(&req(Kind::Build, Some(10), ""), Some(&m)).unwrap();
+        assert_eq!(l.message, "/slice-flow https://github.com/o/r/issues/10");
+        assert_eq!(l.title, "#10 Slice 10");
+        let err = |n| plan(&req(Kind::Build, Some(n), ""), Some(&m)).unwrap_err().to_string();
+        assert!(err(11).contains("already being built"));
+        // A merged PR naming it is a warning in the UI, not a refusal: the rule can be wrong.
+        assert!(plan(&req(Kind::Build, Some(12), ""), Some(&m)).is_ok());
+        assert!(err(2).contains("isn't on this map"));
+        let a = plan(&req(Kind::Ask, Some(10), "Which table?"), Some(&m)).unwrap();
+        assert!(a.message.contains("build slice Slice 10"));
     }
 
     #[test]

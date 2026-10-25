@@ -14,12 +14,38 @@ the map straight from GitHub and can act on it.
 
 - **Reads maps from GitHub.** A map is an issue labelled `wayfinder:map`; its sub-issues are the
   tickets, typed by a `wayfinder:<type>` label and wired with GitHub's native issue dependencies.
-  One GraphQL query (through `gh`, so starchart holds no token) returns a whole map.
+  A couple of GraphQL queries (through `gh`, so starchart holds no token) return a map: its
+  tickets with their blockers and a count of their slices, and the repo's check issues. A
+  ticket's slices are read when you open it. GitHub charges a query for every node it *could*
+  return and separately limits reads of sub-issues and dependencies (a limit `gh api
+  rate_limit` doesn't show), so reading every ticket's slices with each refresh spent both
+  within minutes. Now a map refresh costs about 7 of the 5,000 points an hour, and opening a
+  ticket about 3.
 - **Derives each ticket's status.** Closed as completed is *resolved*, closed as not planned is
   *out of scope*. An open ticket whose assignee has commented on it is *claimed*. An assignee who
   never commented left an abandoned claim, so the ticket counts as free. A free ticket is on the
   *frontier* when every blocker is closed, blockers off the map included, and *blocked*
   otherwise.
+- **Shows the build.** A ticket's sub-issues are its build slices (a fold-in's, usually), drawn
+  as squares on a small orbit around it, filled once built; a ticket on the map with a build
+  label (`ready-for-agent`, `ready-for-human`, `size:*`) is a slice with no parent, laid out
+  beside the decisions. A fold-in carries a ring that fills as its slices are built; its squares
+  appear once you've opened it, which reads them. A slice is
+  ready, blocked, being built (claimed, or a PR names it as its own, the rule
+  `scripts/frontier.sh` uses), needs a human, built or dropped. Its open agent and owner checks
+  (the `check:` issues written from it, "From slice #613" or a **Slice:** link, with their
+  **Due:** line) hang off it as flags, and the map's open checks gather in a tray in the bottom
+  bar. **Build this slice** starts `/slice-flow <slice>`; a merged
+  PR that already names the slice turns it into a warning and **Build anyway**.
+- **Reads a closed map as its spec.** A closed map opens as a document: its destination, then
+  the sections of `SPEC.md` and `CONTEXT.md` that its merged PRs changed (any merged PR that
+  references a ticket on the map and touches either file), as they read on the default branch
+  now. A section that has changed since is flagged, with a link to it as merged. Each section
+  lists the build slices that cite it (`§3.11` in the slice's body) and whether they're built;
+  one with no slice, and not changed together with its code, is flagged as a gap. Alongside:
+  the decisions, what was ruled out, slices defined and built, spec coverage, and the open agent
+  and owner checks. `--spec` and `--glossary` name other files; View › Read the spec opens it for an open
+  map too.
 - **Starts sessions.** Each one is a new thread in T3, started through T3's own `t3` CLI:
 
   | Button | Where | The thread is told |
@@ -28,6 +54,7 @@ the map straight from GitHub and can act on it.
   | Ask | any ticket | to read the ticket and answer your question, changing nothing |
   | Next on the frontier | the map | `/wayfinder <map>` |
   | Start a charting session | the map list, or the bar under a map | `/wayfinder <your idea>` |
+  | Build this slice | a ready slice | `/slice-flow <slice>` |
 
   A note you type goes into the prompt, quoted as yours. A ticket's thread is titled
   `#<n> <title>`, so the map can find it again: a ticket with a live thread carries an orbiting
@@ -46,7 +73,7 @@ cargo build --release
 
 Then open http://127.0.0.1:7788. Repeat `--project` for more repositories; the path is the
 checkout T3 starts sessions in. `--help` lists the rest (`--port`, `--worktree-base`, `--gh`,
-`--t3`).
+`--t3`, `--spec`, `--glossary`).
 
 ### Develop
 

@@ -4,7 +4,7 @@
 // lines or pages count as pixels, a ticket with a live T3 thread carries an orbiting moon, hubs
 // gather their neighbours into clusters, and hovering anything explains it (see Hover).
 
-import type { Edge, Status, Ticket, WayMap } from "./types";
+import type { BuildSlice, Edge, SliceState, Status, Ticket, WayMap } from "./types";
 
 type Node = Ticket & {
   x: number;
@@ -23,6 +23,22 @@ type Node = Ticket & {
   moon: number;
 };
 type FogPt = { index: number; title: string; anchor: Node | null; x: number; y: number; emph: number };
+// A build slice on the canvas. One with a parent sits at a fixed offset (ox, oy) from it, on a
+// small orbit; one without a parent has its own place (x, y). `vis` eases toward whether it's
+// shown: a fold-in's slices appear when zoomed in, or when the fold-in or one of them is in focus.
+type SNode = BuildSlice & { x: number; y: number; ox: number; oy: number; _x: number; _y: number; vis: number; emph: number; dim: number };
+
+// Slice colours: filled once built, an outline with a tint until then.
+export const SCOL: Record<SliceState, string> = {
+  ready: "#4d9bff",
+  building: "#ffb52e",
+  blocked: "#ff4d4d",
+  human: "#f472b6",
+  built: "#3fd07f",
+  dropped: "#6f6a7c",
+};
+const SLICE_H = 6.5;
+const SLICES_FROM_ZOOM = 0.85;
 // A hub (a ticket wired to three or more others) and the neighbours that hang off it.
 type Cluster = { hub: Node; members: Node[]; cx: number; cy: number; k: number; emph: number; dim: number };
 type Cam = { x: number; y: number; s: number };
@@ -178,17 +194,19 @@ export type Hover =
   | { kind: "edge"; from: number; to: number; satisfied: boolean }
   | { kind: "moon"; num: number }
   | { kind: "fog"; index: number }
-  | { kind: "cluster"; hub: number; members: number[] };
+  | { kind: "cluster"; hub: number; members: number[] }
+  | { kind: "slice"; num: number };
 
 export type EngineEvents = {
   onSelect: (num: number | null) => void;
   onFog: (index: number) => void;
   onMoon: (num: number) => void;
   onHover: (h: Hover | null) => void;
+  onSlice: (num: number) => void;
 };
 
 const hoverKey = (h: Hover | null) =>
-  !h ? "" : h.kind === "edge" ? `e${h.from}-${h.to}` : h.kind === "fog" ? `f${h.index}` : h.kind === "cluster" ? `c${h.hub}` : `${h.kind[0]}${h.num}`;
+  !h ? "" : h.kind === "edge" ? `e${h.from}-${h.to}` : h.kind === "fog" ? `f${h.index}` : h.kind === "cluster" ? `c${h.hub}` : h.kind === "slice" ? `s${h.num}` : `${h.kind[0]}${h.num}`;
 
 // Hover transitions settle in about 170 ms.
 const HOVER_TAU = 0.055;
@@ -207,6 +225,11 @@ export class Engine {
   private fogPts: FogPt[] = [];
   private clusters: Cluster[] = [];
   private selected: Node | null = null;
+  private slices: SNode[] = [];
+  private sliceBy: Record<number, SNode> = {};
+  private kids: Record<number, SNode[]> = {};
+  private sliceEdges: { from: number; to: number; open: boolean }[] = [];
+  private selectedSlice: SNode | null = null;
   private hover: Hover | null = null;
   private pointer: { x: number; y: number } | null = null;
   private match: Set<number> | null = null;
@@ -272,8 +295,10 @@ export class Engine {
       this.nodes.forEach((n) => { n.px = n.x; n.py = n.y; });
     }
     this.setupClusters();
+    this.setupSlices(m.slices ?? [], same);
     this.setupFog(m);
     if (this.selected) this.selected = this.byNum[this.selected.num] ?? null;
+    if (this.selectedSlice) this.selectedSlice = this.sliceBy[this.selectedSlice.num] ?? null;
     this.setHover(null);
     if (!same) {
       this.fitCamera();
@@ -327,6 +352,79 @@ export class Engine {
       removeEventListener("mouseup", up);
       this.mini = null;
     };
+  }
+
+  // Ease the camera onto a slice, close enough that its fold-in's slices show.
+  selectSlice(num: number | null, panelWidth = 0) {
+    const sn = num == null ? null : this.sliceBy[num] ?? null;
+    this.selectedSlice = sn;
+    this.panelW = panelWidth;
+    if (sn) {
+      const p = sn.parent != null ? this.byNum[sn.parent] : undefined;
+      const x = p ? p.x + sn.ox : sn.x, y = p ? p.y + sn.oy : sn.y;
+      this.goal.s = Math.max(this.goal.s, 1);
+      this.goal.x = (innerWidth - panelWidth) / 2 - x * this.goal.s;
+      this.goal.y = innerHeight / 2 - y * this.goal.s;
+    }
+  }
+
+  // A ticket's slices built, of those not dropped: from the slices once they're loaded, else
+  // from the map's count of them (where a dropped slice counts as closed and in the total).
+  private progress(n: Node): [number, number] | null {
+    const kids = this.kids[n.num]?.filter((k) => k.state !== "dropped");
+    if (kids?.length) return [kids.filter((k) => k.state === "built").length, kids.length];
+    return n.slices ? [n.slices.closed, n.slices.total] : null;
+  }
+
+  // Slices: a fold-in's on a small orbit around it, evenly spaced from the top; slices with no
+  // parent laid out as their own group (by their blockers) beside the decisions.
+  private setupSlices(list: BuildSlice[], same: boolean) {
+    const old = same ? this.sliceBy : {};
+    this.slices = list
+      .filter((sl) => sl.parent == null || this.byNum[sl.parent])
+      .map((sl) => ({ ...sl, x: old[sl.num]?.x ?? 0, y: old[sl.num]?.y ?? 0, ox: 0, oy: 0, _x: 0, _y: 0, vis: old[sl.num]?.vis ?? 0, emph: 0, dim: 0 }));
+    this.sliceBy = {};
+    this.kids = {};
+    for (const sn of this.slices) {
+      this.sliceBy[sn.num] = sn;
+      if (sn.parent != null) (this.kids[sn.parent] ??= []).push(sn);
+    }
+    for (const group of Object.values(this.kids)) {
+      const R = Math.min(72, 30 + 4.5 * group.length);
+      group.forEach((sn, i) => {
+        const a = -Math.PI / 2 + (i * TAU) / group.length;
+        sn.ox = Math.cos(a) * R;
+        sn.oy = Math.sin(a) * R * 0.85;
+      });
+    }
+    this.sliceEdges = this.slices.flatMap((sn) =>
+      sn.blockers.filter((b) => this.sliceBy[b.num]).map((b) => ({ from: b.num, to: sn.num, open: b.open })),
+    );
+    const loose = this.slices.filter((sn) => sn.parent == null);
+    if (!loose.length || (same && loose.every((sn) => old[sn.num]))) return;
+    const looseEdges: Edge[] = this.sliceEdges
+      .filter((e) => this.sliceBy[e.from].parent == null && this.sliceBy[e.to].parent == null)
+      .map((e) => ({ from: e.from, to: e.to, satisfied: !e.open }));
+    const depth = (sn: SNode, seen = new Set<number>()): number => {
+      if (seen.has(sn.num)) return 0;
+      seen.add(sn.num);
+      const bs = sn.blockers.map((b) => this.sliceBy[b.num]).filter((b) => b && b.parent == null);
+      return bs.length ? 1 + Math.max(...bs.map((b) => depth(b, seen))) : 0;
+    };
+    const items = loose.map((sn) => ({ num: sn.num, rank: Math.min(depth(sn), 2), x: 0, y: 0 }));
+    layout(items, looseEdges);
+    // Shrink the rings to suit small squares, then set the group beside the decisions.
+    let tx = 0, cy = 0;
+    if (this.nodes.length) {
+      tx = Math.max(...this.nodes.map((n) => n.x)) + 200;
+      cy = this.nodes.reduce((a, n) => a + n.y, 0) / this.nodes.length;
+    }
+    const minx = Math.min(...items.map((i) => i.x)), my = items.reduce((a, i) => a + i.y, 0) / items.length;
+    items.forEach((it) => {
+      const sn = this.sliceBy[it.num];
+      sn.x = tx + (it.x - minx) * 0.6;
+      sn.y = cy + (it.y - my) * 0.6;
+    });
   }
 
   // Ease the camera so the star sits centred in the space the panel leaves.
@@ -401,12 +499,13 @@ export class Engine {
   }
 
   private fitCamera() {
-    if (!this.nodes.length) { this.goal = { x: innerWidth / 2, y: innerHeight / 2, s: 1 }; return; }
+    if (!this.nodes.length && !this.slices.length) { this.goal = { x: innerWidth / 2, y: innerHeight / 2, s: 1 }; return; }
     let minx = 1e9, miny = 1e9, maxx = -1e9, maxy = -1e9;
     const grow = (x: number, y: number, r: number) => {
       minx = Math.min(minx, x - r); miny = Math.min(miny, y - r); maxx = Math.max(maxx, x + r); maxy = Math.max(maxy, y + r);
     };
     this.nodes.forEach((n) => grow(n.x, n.y, 0));
+    this.slices.forEach((sn) => { if (sn.parent == null) grow(sn.x, sn.y, 20); });
     this.fogPts.forEach((f) => grow(f.x, f.y, 90));
     const pad = 70;
     minx -= pad; miny -= pad; maxx += pad; maxy += pad;
@@ -516,11 +615,24 @@ export class Engine {
     return best;
   }
 
-  // In order of what sits on top: a moon over its star, a star over an edge, an edge over
-  // fog, and a cluster's empty space last.
+  // A shown slice under the pointer.
+  private pickSlice(mx: number, my: number) {
+    let best: SNode | null = null, bd = 1e9;
+    for (const sn of this.slices) {
+      if (sn.vis < 0.5) continue;
+      const p = this.w2s(sn), d = Math.hypot(p.x - mx, p.y - my);
+      if (d < Math.max(10, SLICE_H * this.ec.s + 5) && d < bd) { bd = d; best = sn; }
+    }
+    return best;
+  }
+
+  // In order of what sits on top: a moon over its star, a slice over a star, a star over an
+  // edge, an edge over fog, and a cluster's empty space last.
   private pick(mx: number, my: number): Hover | null {
     const moon = this.pickMoon(mx, my);
     if (moon) return { kind: "moon", num: moon.num };
+    const sl = this.pickSlice(mx, my);
+    if (sl) return { kind: "slice", num: sl.num };
     const n = this.pickNode(mx, my);
     if (n) return { kind: "node", num: n.num };
     const e = this.pickEdge(mx, my);
@@ -542,6 +654,8 @@ export class Engine {
   private hitTest(mx: number, my: number) {
     const moon = this.pickMoon(mx, my);
     if (moon) { this.events.onMoon(moon.num); return; }
+    const sl = this.pickSlice(mx, my);
+    if (sl) { this.events.onSlice(sl.num); return; }
     const n = this.pickNode(mx, my);
     if (n) { this.events.onSelect(n.num); return; }
     const f = this.pickFog(mx, my);
@@ -641,6 +755,32 @@ export class Engine {
       hubFocus = this.clusters.find((c) => c.hub.num === h.hub) ?? null;
       hubFocus?.members.forEach((m) => near.add(m.num));
       focusing = !!hubFocus;
+    } else if (h?.kind === "slice") {
+      // A slice keeps its fold-in and the slices it waits on or unblocks lit.
+      focusing = true;
+      const sn = this.sliceBy[h.num];
+      if (sn?.parent != null) near.add(sn.parent);
+    }
+    // The slices that stay lit: a hovered fold-in's, or a hovered slice and its blocking edges.
+    const litSlices = new Set<number>();
+    if (h?.kind === "node") this.kids[h.num]?.forEach((sn) => litSlices.add(sn.num));
+    if (h?.kind === "cluster") hubFocus?.members.forEach((m) => this.kids[m.num]?.forEach((sn) => litSlices.add(sn.num)));
+    if (h?.kind === "slice") {
+      litSlices.add(h.num);
+      for (const e of this.sliceEdges) {
+        if (e.from === h.num) litSlices.add(e.to);
+        if (e.to === h.num) litSlices.add(e.from);
+      }
+    }
+    for (const sn of this.slices) {
+      sn.emph = ease(sn.emph, h?.kind === "slice" && h.num === sn.num ? 1 : 0);
+      sn.dim = ease(sn.dim, focusing && !litSlices.has(sn.num) ? 1 : 0);
+      // Shown when zoomed in, always when it has no fold-in to fold into, and whenever its
+      // fold-in or a sibling is hovered or selected.
+      const p = sn.parent != null ? this.byNum[sn.parent] : undefined;
+      const focus = !p || this.cam.s >= SLICES_FROM_ZOOM || p === this.selected || p.emph > 0.3 || p.rel > 0.5
+        || this.selectedSlice?.parent === sn.parent || (h?.kind === "slice" && this.sliceBy[h.num]?.parent === sn.parent);
+      sn.vis = ease(sn.vis, focus ? 1 : 0);
     }
     for (const n of this.nodes) {
       n.emph = ease(n.emph, lit.has(n.num) ? 1 : 0);
@@ -699,6 +839,9 @@ export class Engine {
     } else if (h?.kind === "cluster") {
       const c = this.clusters.find((x) => x.hub.num === h.hub);
       if (c) { const p = this.w2s({ x: c.cx, y: c.cy }); a = { x: p.x, y: p.y, r: c.k * CLUSTER_ASPECT.x * this.ec.s * 0.75 }; }
+    } else if (h?.kind === "slice") {
+      const sn = this.sliceBy[h.num];
+      if (sn && sn !== this.selectedSlice) a = { ...this.w2s(sn), r: SLICE_H * this.ec.s + 14 };
     }
     if (!a || this.mapAlpha < 0.5) { el.dataset.show = ""; return; }
     const w = el.offsetWidth, ht = el.offsetHeight, right = innerWidth - this.panelW - 12;
@@ -708,6 +851,107 @@ export class Engine {
     const y = clamp(a.y - ht / 2, 66, Math.max(66, innerHeight - 100 - ht));
     el.style.transform = `translate(${Math.round(x)}px,${Math.round(y)}px)`;
     el.dataset.show = "1";
+  }
+
+  // Each fold-in's slice orbit, faint, while its slices show.
+  private drawOrbitsOfSlices() {
+    const ctx = this.ctx;
+    for (const [p, group] of Object.entries(this.kids)) {
+      const n = this.byNum[Number(p)], vis = Math.max(...group.map((g) => g.vis));
+      if (!n || vis < 0.02) continue;
+      const R = Math.hypot(group[0].ox, group[0].oy / 0.85);
+      ctx.globalAlpha = this.mapAlpha * vis * (1 - 0.7 * n.dim);
+      ctx.strokeStyle = "rgba(170,190,240,0.16)"; ctx.lineWidth = 1 / this.ec.s;
+      ctx.beginPath(); ctx.ellipse(n._x, n._y, R, R * 0.85, 0, 0, TAU); ctx.stroke();
+    }
+    ctx.globalAlpha = this.mapAlpha;
+  }
+
+  // A blocking edge between two shown slices: red and dashed while the blocker is open.
+  private drawSliceEdge(e: { from: number; to: number; open: boolean }) {
+    const a = this.sliceBy[e.from], b = this.sliceBy[e.to], ctx = this.ctx;
+    const vis = Math.min(a.vis, b.vis);
+    if (vis < 0.02) return;
+    const hi = Math.max(a.emph, b.emph);
+    ctx.globalAlpha = this.mapAlpha * vis * (1 - 0.75 * Math.min(a.dim, b.dim));
+    const col = e.open ? "255,96,96" : "120,170,255";
+    const dx = b._x - a._x, dy = b._y - a._y, len = Math.hypot(dx, dy) || 1, ux = dx / len, uy = dy / len;
+    const sx = a._x + ux * (SLICE_H + 3), sy = a._y + uy * (SLICE_H + 3), tx = b._x - ux * (SLICE_H + 4), ty = b._y - uy * (SLICE_H + 4);
+    ctx.strokeStyle = `rgba(${col},${0.55 + 0.4 * hi})`; ctx.lineWidth = 1.2 + hi;
+    if (e.open) { ctx.setLineDash([3, 4]); ctx.lineDashOffset = -this.clock * 6; }
+    ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(tx, ty); ctx.stroke();
+    ctx.setLineDash([]); ctx.lineDashOffset = 0;
+    const ah = 6, aw = 3.2;
+    ctx.beginPath(); ctx.moveTo(tx, ty);
+    ctx.lineTo(tx - ux * ah - uy * aw, ty - uy * ah + ux * aw);
+    ctx.lineTo(tx - ux * ah + uy * aw, ty - uy * ah - ux * aw);
+    ctx.closePath(); ctx.fillStyle = `rgba(${col},0.9)`; ctx.fill();
+    ctx.globalAlpha = this.mapAlpha;
+  }
+
+  // A slice: a rounded square, filled once built, an outline with a tint until then. Open
+  // checks hang off it as small flags (amber for the owner, blue for an agent).
+  private drawSlice(sn: SNode) {
+    if (sn.vis < 0.02) return;
+    const ctx = this.ctx, col = SCOL[sn.state], x = sn._x, y = sn._y;
+    const searched = this.match != null && !this.match.has(sn.num) ? 0.2 : 1;
+    ctx.globalAlpha = this.mapAlpha * sn.vis * searched * (1 - 0.7 * sn.dim);
+    const h = SLICE_H * (1 + 0.25 * sn.emph) * (0.6 + 0.4 * sn.vis);
+    const g = ctx.createRadialGradient(x, y, 0, x, y, h * 3);
+    g.addColorStop(0, hexA(col, 0.35 + 0.25 * sn.emph)); g.addColorStop(1, hexA(col, 0));
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, h * 3, 0, TAU); ctx.fill();
+    const r = h * 0.35;
+    ctx.beginPath(); ctx.roundRect(x - h, y - h, h * 2, h * 2, r);
+    if (sn.state === "built") { ctx.fillStyle = col; ctx.fill(); }
+    else {
+      ctx.fillStyle = hexA(col, sn.state === "dropped" ? 0.08 : 0.22); ctx.fill();
+      ctx.strokeStyle = col; ctx.lineWidth = 1.6; ctx.stroke();
+    }
+    // A live T3 thread on it: a ring that turns.
+    if (this.threads.has(sn.num)) {
+      ctx.strokeStyle = "rgba(225,215,255,0.8)"; ctx.lineWidth = 1; ctx.setLineDash([2, 3]); ctx.lineDashOffset = -this.clock * 8;
+      ctx.beginPath(); ctx.arc(x, y, h + 6, 0, TAU); ctx.stroke(); ctx.setLineDash([]); ctx.lineDashOffset = 0;
+    }
+    sn.checks.filter((c) => c.open).slice(0, 2).forEach((c, i) => {
+      const fx = x + h + 3 + i * 6, fy = y - h - 1;
+      ctx.strokeStyle = "rgba(220,225,235,0.8)"; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(fx, fy + 8); ctx.lineTo(fx, fy - 2); ctx.stroke();
+      ctx.fillStyle = c.kind === "owner" ? "#ffb52e" : "#4d9bff";
+      ctx.beginPath(); ctx.moveTo(fx, fy - 2); ctx.lineTo(fx + 5, fy); ctx.lineTo(fx, fy + 2.5); ctx.closePath(); ctx.fill();
+    });
+    if (this.selectedSlice === sn) {
+      ctx.strokeStyle = "rgba(255,255,255,0.9)"; ctx.lineWidth = 1.4;
+      ctx.beginPath(); ctx.roundRect(x - h - 5, y - h - 5, h * 2 + 10, h * 2 + 10, r + 3); ctx.stroke();
+    }
+    ctx.globalAlpha = this.mapAlpha;
+  }
+
+  // Slice labels, in screen space: the number once its square is a fair size, the title for the
+  // hovered or selected one. They yield to the tickets' labels already placed.
+  private drawSliceLabels(a: number, placed: { x: number; y: number; w: number }[], fs: number) {
+    const ctx = this.ctx, s = this.cam.s;
+    for (const sn of this.slices) {
+      const focus = sn.emph > 0.5 || sn === this.selectedSlice;
+      if (sn.vis < 0.6 || (!focus && s < 0.7)) continue;
+      const p = this.w2s(sn), lx = p.x + SLICE_H * s + 6, ly = p.y + SLICE_H * s * 0.6 + 6;
+      const num = `#${sn.num}`;
+      const title = focus ? "  " + (sn.title.length > 40 ? sn.title.slice(0, 39) + "…" : sn.title) : "";
+      ctx.font = `600 ${(fs - 1).toFixed(1)}px ui-sans-serif,system-ui,sans-serif`;
+      const nw = ctx.measureText(num).width;
+      ctx.font = `${(fs - 1.5).toFixed(1)}px ui-sans-serif,system-ui,sans-serif`;
+      const w = nw + (title ? ctx.measureText(title).width : 0), h = fs;
+      if (!focus && placed.some((q) => lx < q.x + q.w + 4 && lx + w + 4 > q.x && Math.abs(ly - q.y) < h)) continue;
+      placed.push({ x: lx, y: ly, w });
+      const al = a * sn.vis * (1 - 0.7 * sn.dim);
+      ctx.font = `600 ${(fs - 1).toFixed(1)}px ui-sans-serif,system-ui,sans-serif`;
+      ctx.fillStyle = hexA(SCOL[sn.state] === SCOL.dropped ? "#8a8496" : "#dfe6f2", al);
+      ctx.fillText(num, lx, ly);
+      if (title) {
+        ctx.font = `${(fs - 1.5).toFixed(1)}px ui-sans-serif,system-ui,sans-serif`;
+        ctx.fillStyle = `rgba(214,220,232,${al.toFixed(3)})`;
+        ctx.fillText(title, lx + nw, ly);
+      }
+    }
   }
 
   private initStars() {
@@ -895,6 +1139,20 @@ export class Engine {
       ctx.strokeStyle = running || mh ? "rgba(241,235,255,0.85)" : "rgba(183,174,216,0.6)";
       ctx.beginPath(); ctx.arc(m.x, m.y, (running ? 4.6 : 4) * (1 + 0.4 * mh), 0, TAU); ctx.stroke();
     }
+    // A fold-in's build progress: a ring that fills green as its slices are built.
+    const prog = this.progress(n);
+    if (prog) {
+      const [done, all] = prog;
+      const R = c.r * grow + 15;
+      ctx.lineWidth = 2.6; ctx.lineCap = "round";
+      ctx.strokeStyle = "rgba(200,215,255,0.14)";
+      ctx.beginPath(); ctx.arc(x, y, R, 0, TAU); ctx.stroke();
+      if (done) {
+        ctx.strokeStyle = SCOL.built;
+        ctx.beginPath(); ctx.arc(x, y, R, -Math.PI / 2, -Math.PI / 2 + (TAU * done) / Math.max(1, all)); ctx.stroke();
+      }
+      ctx.lineCap = "butt";
+    }
     if (this.selected === n) {
       ctx.strokeStyle = "rgba(255,255,255,0.9)"; ctx.lineWidth = 1.5;
       ctx.beginPath(); ctx.arc(x, y, c.r * grow + 12, 0, TAU); ctx.stroke();
@@ -1007,12 +1265,20 @@ export class Engine {
       ctx.font = `600 ${fs.toFixed(1)}px ui-sans-serif,system-ui,sans-serif`;
       ctx.fillStyle = hexA(LABELCOL[n.status], al);
       ctx.fillText(num, lx, fy);
+      // A fold-in carries its slice count: built of defined.
+      const prog = this.progress(n);
+      if (prog && !title) {
+        ctx.font = `600 ${(fs - 1.5).toFixed(1)}px ui-sans-serif,system-ui,sans-serif`;
+        ctx.fillStyle = hexA(SCOL.built, al);
+        ctx.fillText(`  ${prog[0]}/${prog[1]}`, lx + nw, fy);
+      }
       if (title) {
         ctx.font = `${(fs - 0.5).toFixed(1)}px ui-sans-serif,system-ui,sans-serif`;
         ctx.fillStyle = `rgba(214,220,232,${(al * (f ? 1 : 0.8)).toFixed(3)})`;
         ctx.fillText("  " + title, lx + nw, fy);
       }
     }
+    this.drawSliceLabels(a, placed, fs);
     if (s >= 0.32 && this.fogPts.length) {
       const ffs = clamp(12 * Math.pow(s, 0.3), 9, 13.5);
       ctx.font = `italic ${ffs.toFixed(1)}px ui-sans-serif,system-ui,sans-serif`;
@@ -1048,6 +1314,11 @@ export class Engine {
     for (const f of this.fogPts) {
       ctx.fillStyle = "rgba(150,100,236,0.35)"; ctx.beginPath(); ctx.arc(f.x * s + ox, f.y * s + oy, 4, 0, TAU); ctx.fill();
     }
+    for (const sn of this.slices) {
+      if (sn.parent != null) continue;
+      ctx.fillStyle = SCOL[sn.state];
+      ctx.fillRect(sn._x * s + ox - 1.2, sn._y * s + oy - 1.2, 2.4, 2.4);
+    }
     for (const n of this.nodes) {
       ctx.fillStyle = COL[n.status].glow;
       ctx.beginPath(); ctx.arc(n._x * s + ox, n._y * s + oy, n.status === "frontier" ? 2 : 1.4, 0, TAU); ctx.fill();
@@ -1078,6 +1349,11 @@ export class Engine {
       if (n.flare > 0) n.flare = Math.max(0, n.flare - dt / 1.1);
       if (n.enter != null && n.enter < 1) n.enter = Math.min(1, n.enter + dt / 0.55);
     }
+    for (const sn of this.slices) {
+      const p = sn.parent != null ? this.byNum[sn.parent] : undefined;
+      sn._x = p ? p._x + sn.ox : sn.x;
+      sn._y = p ? p._y + sn.oy : sn.y;
+    }
     this.measureClusters();
     this.cam.x += (this.goal.x - this.cam.x) * EASE;
     this.cam.y += (this.goal.y - this.cam.y) * EASE;
@@ -1105,6 +1381,11 @@ export class Engine {
     this.nodes.forEach((n) => { if (!raised(n)) this.drawNode(n); });
     this.edges.forEach((e, i) => { if (up(i)) this.drawEdge(e, i); });
     this.nodes.forEach((n) => { if (raised(n)) this.drawNode(n); });
+    // Slices sit over the stars: their orbits, their blocking edges, then the squares.
+    this.drawOrbitsOfSlices();
+    this.sliceEdges.forEach((e) => this.drawSliceEdge(e));
+    this.slices.forEach((sn) => { if (sn.emph < 0.01) this.drawSlice(sn); });
+    this.slices.forEach((sn) => { if (sn.emph >= 0.01) this.drawSlice(sn); });
     ctx.restore();
     this.drawClusterNames(this.mapAlpha);
     this.drawLabels(this.mapAlpha);
