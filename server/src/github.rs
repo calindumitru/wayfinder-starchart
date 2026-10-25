@@ -18,20 +18,20 @@ use tokio::process::Command;
 
 const MAP_QUERY: &str = r#"query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){issue(number:$number){
 number title body url state stateReason
-subIssues(first:100){nodes{number title body url state stateReason subIssuesSummary{total completed}
+subIssues(first:100){nodes{number title body url state stateReason updatedAt closedAt subIssuesSummary{total completed}
   assignees(first:10){nodes{login}} labels(first:20){nodes{name}}
   blockedBy(first:50){nodes{number title state}}
   comments(first:100){nodes{author{login} body}}
   timelineItems(first:20,itemTypes:[CROSS_REFERENCED_EVENT]){nodes{...on CrossReferencedEvent{source{...pr}}}}}}}}}
-fragment pr on ReferencedSubject{...on PullRequest{number url state merged body}}"#;
+fragment pr on ReferencedSubject{...on PullRequest{number url state merged body updatedAt}}"#;
 
 const SLICES_QUERY: &str = r#"query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){issue(number:$number){
-subIssues(first:50){nodes{number title body url state stateReason
+subIssues(first:50){nodes{number title body url state stateReason updatedAt closedAt
   assignees(first:5){nodes{login}} labels(first:10){nodes{name}}
   blockedBy(first:20){nodes{number title state}}
   comments(first:20){nodes{author{login}}}
   timelineItems(first:15,itemTypes:[CROSS_REFERENCED_EVENT]){nodes{...on CrossReferencedEvent{source{...pr}}}}}}}}}
-fragment pr on ReferencedSubject{...on PullRequest{number url state merged body}}"#;
+fragment pr on ReferencedSubject{...on PullRequest{number url state merged body updatedAt}}"#;
 
 const CHECKS_QUERY: &str = r#"query($owner:String!,$name:String!){repository(owner:$owner,name:$name){
 issues(first:100,labels:["check:owner","check:agent"],orderBy:{field:UPDATED_AT,direction:DESC}){nodes{
@@ -41,6 +41,16 @@ const LIST_QUERY: &str = r#"query($owner:String!,$name:String!){repository(owner
 issues(first:100,labels:["wayfinder:map"],orderBy:{field:CREATED_AT,direction:DESC}){nodes{
 number title url state subIssuesSummary{total completed}}}}}"#;
 
+/// A map's tickets, asked of each map that has any, as many as it has: whether each is closed,
+/// whether it's a slice (by its labels), and how many slices it has and has closed.
+const TICKETS: &str = "nodes{state labels(first:10){nodes{name}} subIssuesSummary{total completed}}";
+
+#[derive(Serialize, Clone, Copy, Debug, Default, PartialEq)]
+pub struct Progress {
+    pub done: u32,
+    pub total: u32,
+}
+
 #[derive(Serialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct MapSummary {
@@ -48,8 +58,10 @@ pub struct MapSummary {
     pub name: String,
     pub url: String,
     pub open: bool,
-    pub total: u32,
-    pub completed: u32,
+    /// Its decisions (tickets that aren't slices), closed of all.
+    pub decisions: Progress,
+    /// Its build slices, closed (built or dropped) of all: those on the map and its tickets'.
+    pub build: Progress,
 }
 
 #[derive(Clone)]
@@ -157,8 +169,34 @@ impl GitHub {
         Ok(())
     }
 
+    /// The maps, newest first, with their progress. Their tickets are asked of each map for
+    /// as many as it has, so the cost follows the tickets there are; see the module notes.
     pub async fn maps(&self, repo: &str) -> Result<Vec<MapSummary>> {
-        parse_list(&self.graphql(LIST_QUERY, repo, None).await?)
+        let v = self.graphql(LIST_QUERY, repo, None).await?;
+        let mut list = parse_list(&v)?;
+        let asks: String = nodes(&v["data"]["repository"], "issues")
+            .filter_map(|i| {
+                let total = i.pointer("/subIssuesSummary/total")?.as_u64()?;
+                let n = num(i, "number");
+                (total > 0).then(|| {
+                    format!(
+                        "m{n}:issue(number:{n}){{subIssues(first:{}){{{TICKETS}}}}}",
+                        total.min(100)
+                    )
+                })
+            })
+            .collect();
+        if asks.is_empty() {
+            return Ok(list);
+        }
+        let query = format!("query($owner:String!,$name:String!){{repository(owner:$owner,name:$name){{{asks}}}}}");
+        let got = self.graphql(&query, repo, None).await?;
+        for m in &mut list {
+            if let Some(map) = got.pointer(&format!("/data/repository/m{}", m.num)) {
+                (m.decisions, m.build) = progress(map);
+            }
+        }
+        Ok(list)
     }
 
     /// The map's merged spec PRs, build slices and checks; see `spec`. It reads the slices of
@@ -312,6 +350,8 @@ fn raw_issue(v: &Value) -> RawIssue {
                 body: s(c, "body"),
             })
             .collect(),
+        updated_at: s(v, "updatedAt"),
+        closed_at: v.get("closedAt").and_then(Value::as_str).map(str::to_string),
         sub_total: v
             .pointer("/subIssuesSummary/total")
             .and_then(Value::as_u64)
@@ -329,6 +369,7 @@ fn raw_issue(v: &Value) -> RawIssue {
                 open: s(x, "state") == "OPEN",
                 merged: x.get("merged") == Some(&Value::Bool(true)),
                 body: s(x, "body"),
+                updated_at: s(x, "updatedAt"),
             })
             .collect(),
     }
@@ -354,13 +395,32 @@ pub fn parse_list(v: &Value) -> Result<Vec<MapSummary>> {
             name: s(i, "title"),
             url: s(i, "url"),
             open: s(i, "state") == "OPEN",
-            total: i.get("subIssuesSummary").map(|x| num(x, "total")).unwrap_or_default(),
-            completed: i
-                .get("subIssuesSummary")
-                .map(|x| num(x, "completed"))
-                .unwrap_or_default(),
+            decisions: Progress::default(),
+            build: Progress::default(),
         })
         .collect())
+}
+
+/// A map's decisions and build, from its tickets: a build-labelled ticket is a slice; any other
+/// is a decision, whose own sub-issues are slices.
+pub fn progress(map: &Value) -> (Progress, Progress) {
+    let (mut dec, mut build) = (Progress::default(), Progress::default());
+    for t in nodes(map, "subIssues") {
+        let labels: Vec<String> = nodes(t, "labels").map(|l| s(l, "name")).collect();
+        let closed = (s(t, "state") == "CLOSED") as u32;
+        if model::is_build(&labels) {
+            build.total += 1;
+            build.done += closed;
+        } else {
+            dec.total += 1;
+            dec.done += closed;
+        }
+        if let Some(sum) = t.get("subIssuesSummary") {
+            build.total += num(sum, "total");
+            build.done += num(sum, "completed");
+        }
+    }
+    (dec, build)
 }
 
 #[cfg(test)]
@@ -417,20 +477,21 @@ mod tests {
     }
 
     #[test]
-    fn the_map_list_carries_progress() {
+    fn a_maps_progress_splits_decisions_from_build_slices() {
         let v = json!({"data": {"repository": {"issues": {"nodes": [
-            {"number": 7, "title": "Wayfinder: Seven", "url": "u7", "state": "OPEN", "subIssuesSummary": {"total": 5, "completed": 2}}
+            {"number": 7, "title": "Wayfinder: Seven", "url": "u7", "state": "OPEN", "subIssuesSummary": {"total": 4, "completed": 2}}
         ]}}}});
+        let list = parse_list(&v).unwrap();
+        assert_eq!((list[0].num, list[0].open), (7, true));
+        let map = json!({"subIssues": {"nodes": [
+            {"state": "CLOSED", "labels": {"nodes": [{"name": "wayfinder:grilling"}]}, "subIssuesSummary": {"total": 0, "completed": 0}},
+            {"state": "CLOSED", "labels": {"nodes": [{"name": "wayfinder:task"}]}, "subIssuesSummary": {"total": 4, "completed": 1}},
+            {"state": "OPEN", "labels": {"nodes": [{"name": "wayfinder:research"}]}, "subIssuesSummary": {"total": 0, "completed": 0}},
+            {"state": "CLOSED", "labels": {"nodes": [{"name": "size:s"}]}, "subIssuesSummary": {"total": 0, "completed": 0}}
+        ]}});
         assert_eq!(
-            parse_list(&v).unwrap(),
-            vec![MapSummary {
-                num: 7,
-                name: "Wayfinder: Seven".into(),
-                url: "u7".into(),
-                open: true,
-                total: 5,
-                completed: 2
-            }]
+            progress(&map),
+            (Progress { done: 2, total: 3 }, Progress { done: 2, total: 5 })
         );
     }
 }

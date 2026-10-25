@@ -373,6 +373,7 @@ mod tests {
                     open,
                     merged: !open,
                     body: format!("Slice #{number}"),
+                    updated_at: String::new(),
                 })
                 .into_iter()
                 .collect(),

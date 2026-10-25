@@ -12,6 +12,9 @@ the map straight from GitHub and can act on it.
 
 ## What it does
 
+- **Lists a project's maps** with two bars each: decisions closed, and build slices closed (on
+  the map and its tickets'). A map is put away under "finished" only once it's closed *and* its
+  slices are all closed; a closed map that's still building stays in view.
 - **Reads maps from GitHub.** A map is an issue labelled `wayfinder:map`; its sub-issues are the
   tickets, typed by a `wayfinder:<type>` label and wired with GitHub's native issue dependencies.
   A couple of GraphQL queries (through `gh`, so starchart holds no token) return a map: its
@@ -27,16 +30,36 @@ the map straight from GitHub and can act on it.
   *frontier* when every blocker is closed, blockers off the map included, and *blocked*
   otherwise.
 - **Shows the build.** A ticket's sub-issues are its build slices (a fold-in's, usually), drawn
-  as squares on a small orbit around it, filled once built; a ticket on the map with a build
-  label (`ready-for-agent`, `ready-for-human`, `size:*`) is a slice with no parent, laid out
-  beside the decisions. A fold-in carries a ring that fills as its slices are built; its squares
-  appear once you've opened it, which reads them. A slice is
-  ready, blocked, being built (claimed, or a PR names it as its own, the rule
-  `scripts/frontier.sh` uses), needs a human, built or dropped. Its open agent and owner checks
-  (the `check:` issues written from it, "From slice #613" or a **Slice:** link, with their
-  **Due:** line) hang off it as flags, and the map's open checks gather in a tray in the bottom
-  bar. **Build this slice** starts `/slice-flow <slice>`; a merged
-  PR that already names the slice turns it into a warning and **Build anyway**.
+  as small planets orbiting it; a ticket on the map with a build label (`ready-for-agent`,
+  `ready-for-human`, `size:*`) is a slice with no parent, and these orbit a "Build" hub beside
+  the decisions. A slice is green when it's ready, blue while it's being built (claimed, or a PR
+  names it as its own, the rule `scripts/frontier.sh` uses), hollow red while blocked, gold with
+  a halo when it's **waiting on you** (`ready-for-human`, or an owner check on it is open) and
+  dull rust once it's **stalled** (being built, but neither it nor its open PR has changed in
+  three days). Its size is what it frees: the open slices waiting on it, directly or further
+  down. Finished slices (built, nothing open on them) fold into a ring of dust round their
+  fold-in, and one built in the last two days leaves a small sparkle there that fades as it
+  ages (glowing only in its first twelve hours); hover the ring to list them. Checks are the
+  `check:` issues written from a slice ("From slice #613" or a **Slice:** link, with their
+  **Due:** line). An open owner check makes its slice gold, and the label names it ("Waiting on
+  you: check #826"); each open agent check is a small blue moon on it. All of them gather in a
+  tray in the bottom bar. A fold-in's ring fills as its slices are built, and from the
+  overview a gold or rust pip on it says one of its slices is waiting on you or has stalled.
+  When a map opens, the slices of up to six fold-ins with open slices are read, one after
+  another, so these show without opening each. **Build this slice** starts `/slice-flow
+  <slice>`; a merged PR that already names the slice turns it into a warning and **Build
+  anyway**.
+- **Points the way.** A dashed gold path, a suggestion rather than a dependency, runs from the
+  item worth doing first (waiting on you, then whatever frees the most) along what it frees:
+  slice to slice, out to its fold-in (ringed in gold as the path passes through) and on through
+  the decisions it unblocks. Its last leg, dotted and fainter, reaches the map's destination: a
+  bright violet star past the rim, with long cross spikes and faint rings like a navigation
+  mark, labelled with the map's goal. Hovering it counts what's still open on
+  the map, decisions and build slices separately. Hovering a ticket explains its ring ("6 of 6
+  build slices built").
+- **Hides the labels on request.** View › Show labels, or the L key, turns the map's labels
+  off: then only what you hover or select is labelled. The choice is remembered.
+  Decisions follow the same colours: green on the frontier, blue claimed, pale once resolved.
 - **Reads a closed map as its spec.** A closed map opens as a document: its destination, then
   the sections of `SPEC.md` and `CONTEXT.md` that its merged PRs changed (any merged PR that
   references a ticket on the map and touches either file), as they read on the default branch
@@ -58,7 +81,8 @@ the map straight from GitHub and can act on it.
 
   A note you type goes into the prompt, quoted as yours. A ticket's thread is titled
   `#<n> <title>`, so the map can find it again: a ticket with a live thread carries an orbiting
-  moon, which moves faster while the thread runs. Click the moon to open its thread in the T3
+  moon, which moves faster while the thread runs; a slice with one carries a dashed ring with a
+  moon on it. Click the moon, or the thread's row in the panel, to open the thread in the T3
   app (through a `t3code://` link, using the environment id in T3's data directory).
 
 ## Run it
