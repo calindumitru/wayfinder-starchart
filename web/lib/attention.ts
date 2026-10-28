@@ -10,6 +10,22 @@
 
 import type { BuildSlice, Ticket, WayMap } from "./types";
 
+// What a ticket is drawn as. Its form says its role: a decision is a star, research a nebula, a
+// prototype a protostar, and a fold-in a stellar nursery until it's completed, then a sun its
+// slices orbit. A map with no fold-in at all has a nursery of its own (see nursery).
+export type Body = "star" | "nebula" | "protostar" | "nursery" | "sun";
+
+export const isFoldIn = (t: Ticket) => t.slices != null || (t.type === "task" && /^fold\b/i.test(t.title));
+
+export function bodyOf(t: Ticket): Body {
+  if (isFoldIn(t)) return t.status === "resolved" ? "sun" : "nursery";
+  return t.type === "research" ? "nebula" : t.type === "prototype" ? "protostar" : "star";
+}
+
+// Whether the map's own spec is still forming: it has no fold-in ticket (one ruled out doesn't
+// count), so its centre is a nursery.
+export const nursery = (m: WayMap) => !m.tickets.some((t) => isFoldIn(t) && t.status !== "out_of_scope");
+
 export type Look = "you" | "stalled" | "ready" | "building" | "blocked" | "built" | "dropped";
 export type Step = { kind: "slice" | "ticket" | "dest"; num: number };
 

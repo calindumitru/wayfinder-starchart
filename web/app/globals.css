@@ -37,8 +37,7 @@ select{background:#0e131e;color:#c9cfdb;border:1px solid var(--line-hi);border-r
 .mark.frontier{background:radial-gradient(circle,#fff 0 22%,#a6f3cf 40%,var(--frontier) 75%);box-shadow:0 0 8px 2px rgba(34,197,139,.6)}
 .mark.claimed{background:radial-gradient(circle,#fff 0 22%,#9fd0ff 40%,var(--claimed) 75%);box-shadow:0 0 8px 2px rgba(59,140,255,.6)}
 .mark.resolved{background:radial-gradient(circle,#fff 0 20%,#dfe6f2 40%,var(--resolved) 75%);box-shadow:0 0 5px 1px rgba(135,150,176,.45)}
-.mark.blocked{border-radius:2px;width:9px;height:9px;transform:rotate(45deg);
-  background:linear-gradient(135deg,#ffd0c8,#ff8070 45%,#d8323a);box-shadow:0 0 8px 1px rgba(255,77,77,.6)}
+.mark.blocked{background:radial-gradient(circle,#fff 0 18%,#ff9b8c 40%,#ff3d3d 75%);box-shadow:0 0 8px 1px rgba(255,61,61,.55)}
 .mark.out_of_scope{background:var(--oos)}
 .mark.fog{width:13px;height:13px;background:radial-gradient(circle,#e3d4ff 0 15%,rgba(154,107,240,.85) 40%,rgba(154,107,240,0) 72%);
   box-shadow:0 0 10px 3px rgba(154,107,240,.35)}
@@ -50,12 +49,26 @@ select{background:#0e131e;color:#c9cfdb;border:1px solid var(--line-hi);border-r
 .smark{display:inline-block;flex:0 0 auto;width:10px;height:10px;border-radius:50%;vertical-align:middle;position:relative}
 .smark.ready{background:radial-gradient(circle at 35% 30%,#fff 0 12%,#34d399 45%,#1d7454);box-shadow:0 0 6px rgba(52,211,153,.5)}
 .smark.building{background:radial-gradient(circle at 35% 30%,#fff 0 12%,#4d9bff 45%,#2a558c);box-shadow:0 0 6px rgba(77,155,255,.5)}
-.smark.you{background:radial-gradient(circle at 35% 30%,#fff 0 12%,#ffc53d 45%,#8c6c22);box-shadow:0 0 0 2px #0b0f18,0 0 0 3.2px rgba(255,197,61,.85),0 0 9px rgba(255,197,61,.6)}
+.smark.you{background:radial-gradient(circle at 35% 30%,#fff 0 12%,#ffc53d 45%,#8c6c22);box-shadow:0 0 7px rgba(255,197,61,.6)}
 .smark.stalled{background:radial-gradient(circle at 35% 30%,#e9a27c,#b45a35 45%,#5c2617)}
 .smark.blocked{border:1.4px solid #c2555a;background:rgba(194,85,90,.14)}
 .smark.built{width:8px;height:8px;background:#c8d4eb;box-shadow:0 0 5px rgba(200,212,235,.6)}
 .smark.dropped{border:1.4px solid #6f6a7c;background:rgba(111,106,124,.1)}
 .lmark{display:inline-block;flex:0 0 auto;vertical-align:middle}
+/* The forms in the key: what each kind of ticket is drawn as. */
+.bmark{display:inline-block;flex:0 0 auto;width:16px;height:16px;vertical-align:middle;position:relative}
+.bmark.star{background:
+  radial-gradient(circle,#fff 0 12%,rgba(220,230,255,.6) 22%,transparent 40%),
+  linear-gradient(90deg,transparent 46%,rgba(235,240,255,.85) 50%,transparent 54%),
+  linear-gradient(0deg,transparent 46%,rgba(235,240,255,.85) 50%,transparent 54%)}
+.bmark.nebula{background:radial-gradient(ellipse 45% 35% at 40% 45%,rgba(60,210,170,.55),transparent),radial-gradient(ellipse 50% 40% at 62% 58%,rgba(122,92,255,.5),transparent)}
+.bmark.protostar{background:radial-gradient(circle,#fff 0 12%,rgba(255,220,180,.6) 22%,transparent 34%)}
+.bmark.protostar::after{content:"";position:absolute;left:0;top:5px;width:14px;height:5px;border:1.5px solid rgba(255,214,170,.6);border-radius:50%;transform:rotate(-20deg)}
+.bmark.nursery{background:radial-gradient(circle,rgba(255,246,220,.95) 0 10%,rgba(255,190,100,.5) 25%,transparent 45%),radial-gradient(ellipse 50% 40% at 35% 60%,rgba(255,138,61,.45),transparent),radial-gradient(ellipse 45% 40% at 68% 38%,rgba(138,92,255,.4),transparent)}
+.bmark.sun{width:12px;height:12px;margin:0 2px;border-radius:50%;background:radial-gradient(circle at 40% 40%,#fff8dc,#ffcf4d 55%,#e08a1a);box-shadow:0 0 8px rgba(255,176,48,.7)}
+.lmark.sat{width:6px;height:6px;margin:0 5px;border-radius:50%}
+.lmark.sat.owner{background:var(--gold);box-shadow:0 0 5px rgba(255,197,61,.7)}
+.lmark.sat.agent{background:#4d9bff;box-shadow:0 0 5px rgba(77,155,255,.7)}
 .lmark.dust{width:14px;height:10px;background:radial-gradient(circle,#c8d4eb 0 1px,transparent 1.5px) 0 0/4px 4px}
 .lmark.path{width:16px;height:2px;background:repeating-linear-gradient(90deg,var(--gold) 0 5px,transparent 5px 8px)}
 /* Checks are small moons: gold for the owner, blue for an agent. */
@@ -177,6 +190,7 @@ select{background:#0e131e;color:#c9cfdb;border:1px solid var(--line-hi);border-r
 .hovertip .tdust{margin:6px 0 0;padding:0;list-style:none;font-size:12px;color:var(--soft);display:grid;gap:2px}
 .hovertip .tdust b{color:#dfe6f2;font-weight:600}.hovertip .tdust .more{color:var(--mute)}
 .hovertip .tkind.dest{color:#cdb8ff;font-size:11px;letter-spacing:.08em;text-transform:uppercase;font-weight:600}
+.hovertip .tkind.nursery{color:#ffd9a8;font-size:11px;letter-spacing:.08em;text-transform:uppercase;font-weight:600}
 .hovertip .twarn{color:#ffb35c}
 .hovertip .tchecks{display:flex;flex-direction:column;gap:3px;margin-top:8px;font-size:12px}
 .hovertip .tchecks>span{display:flex;align-items:center;gap:7px}

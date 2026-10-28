@@ -7,7 +7,7 @@ import type { BuildSlice, LaunchRequest, MapCheck, MapSpec, MapSummary, Progress
 import * as I from "./Icons";
 import { HoverTip } from "./HoverTip";
 import { Mark, Panel, SLICE_LOOK, SliceMark, type Selection } from "./Panel";
-import { attention, type Attention, type Look } from "@/lib/attention";
+import { attention, bodyOf, nursery, type Attention, type Body, type Look } from "@/lib/attention";
 import { SpecReader } from "./SpecReader";
 import { StarMap } from "./StarMap";
 
@@ -439,12 +439,36 @@ function Legend({ map, att, live, only, onOnly }: { map: WayMap; att: Attention;
           <span className="lc">{count[l.status]}</span>
         </button>
       ))}
+      <BodyLegend map={map} />
       {(map.slices.length > 0 || map.tickets.some((t) => t.slices)) && <SliceLegend map={map} att={att} />}
       <div className="lrow static"><Mark status="thread" /> <span className="ll">Active T3 thread</span><span className="lc">{live || ""}</span></div>
       <div className="lrow static"><Mark status="fog" /> <span className="ll">Open question</span><span className="lc">{map.fog.length || ""}</span></div>
       <div className="lbar" title={`${done}% resolved or ruled out`}><span style={{ width: `${done}%` }} /></div>
       <div className="lhint">drag to pan · scroll to zoom · click a star · L for labels</div>
     </aside>
+  );
+}
+
+const BODIES: { body: Body; label: string; hint: string }[] = [
+  { body: "star", label: "Decision", hint: "star" },
+  { body: "nebula", label: "Research", hint: "nebula" },
+  { body: "protostar", label: "Prototype", hint: "protostar" },
+  { body: "nursery", label: "Spec forming", hint: "nursery" },
+  { body: "sun", label: "Fold-in, done", hint: "sun" },
+];
+
+// The forms in the key, for those on this map: a ticket's form says its role, its colour (above)
+// its status.
+function BodyLegend({ map }: { map: WayMap }) {
+  const here = new Set(map.tickets.map(bodyOf));
+  if (nursery(map) && map.tickets.length) here.add("nursery");
+  return (
+    <>
+      <div className="lsep">Forms</div>
+      {BODIES.filter((b) => here.has(b.body)).map((b) => (
+        <div key={b.body} className="lrow static"><span className={`bmark ${b.body}`} /> <span className="ll">{b.label}</span> <span className="lh">({b.hint})</span></div>
+      ))}
+    </>
   );
 }
 
@@ -468,6 +492,8 @@ function SliceLegend({ map, att }: { map: WayMap; att: Attention }) {
         <div key={lk} className="lrow static"><SliceMark look={lk} /> <span className="ll">{SLICE_LOOK[lk]}</span><span className="lc">{all || lk === "you" || lk === "stalled" ? n(lk) || "" : ""}</span></div>
       ))}
       <div className="lrow static"><span className="lmark dust" /> <span className="ll">Built</span> <span className="lh">(in the ring)</span></div>
+      <div className="lrow static"><span className="lmark sat owner" /> <span className="ll">Owner check</span> <span className="lh">(satellite)</span></div>
+      <div className="lrow static"><span className="lmark sat agent" /> <span className="ll">Agent check</span> <span className="lh">(satellite)</span></div>
       <div className="lrow static"><span className="lmark path" /> <span className="ll">Suggested path</span> <span className="lh">(not a dependency)</span></div>
       {!all && <div className="lhint">open a ticket to see its slices</div>}
     </>
