@@ -4,7 +4,8 @@
 // lines or pages count as pixels, a ticket with a live T3 thread carries an orbiting moon, hubs
 // gather their neighbours into clusters, and hovering anything explains it (see Hover).
 
-import { attention, collapsed, GLOW_HOURS, recent, type Attention, type Look } from "./attention";
+import { attention, bodyOf, collapsed, isFoldIn, nursery, GLOW_HOURS, recent, type Attention, type Body, type Look } from "./attention";
+import { texture, textureBudget, type Kind, type Palette } from "./textures";
 import type { BuildSlice, Edge, Status, Ticket, WayMap } from "./types";
 
 type Node = Ticket & {
@@ -22,6 +23,7 @@ type Node = Ticket & {
   rel: number;
   dim: number;
   moon: number;
+  body: Body;
 };
 type FogPt = { index: number; title: string; anchor: Node | null; x: number; y: number; emph: number };
 // A build slice on the canvas, at a fixed offset (ox, oy) from its anchor: its fold-in, or for a
@@ -99,28 +101,85 @@ function shade(hex: string, k: number) {
   return `rgb(${c(0)},${c(2)},${c(4)})`;
 }
 
+// Hex colour mixed toward another by t (0 keeps a, 1 is b).
+function mix(a: string, b: string, t: number) {
+  const p = (h: string, i: number) => parseInt(h.slice(1 + i, 3 + i), 16);
+  return "#" + [0, 2, 4].map((i) => Math.round(p(a, i) + (p(b, i) - p(a, i)) * t).toString(16).padStart(2, "0")).join("");
+}
+
+// A slice's world by its look: green for ready, ochre for you, magma while blocked, grey once
+// built; being built, an ice world in blue, and gone quiet, a cooled rust one (the greyscale
+// set, tinted).
+const WORLD: Partial<Record<Look, Kind>> = { ready: "planet-green", you: "planet-yellow", blocked: "planet-red", stalled: "planet-mono", built: "planet-gray", building: "planet-mono" };
+const TINT: Partial<Record<Look, Palette>> = {
+  building: { stops: ["#06142e", "#1d4f9a", "#6aa8ff", "#eef6ff"], gain: 1, disc: true },
+  stalled: { stops: ["#1c0b06", "#5c2617", "#b45a35", "#e9a27c"], gain: 1, disc: true },
+};
+
+// Concluded research's colours, one per ticket, like the varied gas of real nebulae: teal, rose,
+// indigo, amber, ice and violet.
+const SPENT: [string, string, string, string][] = [
+  ["#0d3b4a", "#1fa3a8", "#8ff0e0", "#f0fffb"],
+  ["#3d0f3a", "#c2408f", "#ffb0d8", "#fff0f8"],
+  ["#1a1650", "#5a5ad8", "#b8b8ff", "#f4f4ff"],
+  ["#4a2208", "#d8782a", "#ffd09a", "#fff6ea"],
+  ["#0b2a50", "#2f86d8", "#a8d8ff", "#f2faff"],
+  ["#2a0f4a", "#9a4ad8", "#e0b0ff", "#fbf2ff"],
+];
+
+// How each painted body is coloured: research over violet, in its status's colour; prototypes
+// in theirs; nurseries a warm forming glow; a sun's corona gold, or grey once ruled out.
+function palette(kind: Kind, status: Status, seed = 0): Palette {
+  const c = COL[status], settled = status === "resolved" || status === "out_of_scope";
+  if (kind === "nebula") {
+    if (status === "out_of_scope") return { stops: [mix(c.glow, "#000000", 0.7), mix(c.glow, "#000000", 0.3), c.glow, c.core], gain: 0.55 };
+    return settled ? { stops: SPENT[seed % SPENT.length], gain: 0.9 } : { stops: ["#3a2a8f", mix("#6a4cff", c.glow, 0.6), c.core, "#ffffff"], gain: 1.3 };
+  }
+  if (kind === "protostar") return { stops: [mix(c.glow, "#000000", 0.5), c.glow, c.core, "#ffffff"], gain: settled ? 0.8 : 1.1 };
+  if (kind === "nursery") return { stops: ["#4a2380", "#e0662a", "#ffc65a", "#fff3dc"], gain: 1.2 };
+  return status === "out_of_scope"
+    ? { stops: ["#3a3844", "#7a7688", "#c8c6d2", "#f0eef6"], gain: 0.9 }
+    : { stops: ["#7a3208", "#f08a1e", "#ffd257", "#fffbe8"], gain: 1.2 };
+}
+
 // A label's status line, in a lighter tint of its look.
 function statusCol(l: Look) {
   return { you: "#ffd36b", stalled: "#e8875c", ready: "#7fe3b8", building: "#8fbcff", blocked: "#e48a8e", built: "#b9c5d8", dropped: "#8a8496" }[l];
 }
 
-export const ringR = (rank: number) => 130 + rank * 165;
+export const ringR = (rank: number) => 110 + rank * 125;
 
 type XY = { num: number; rank: number; x: number; y: number };
 
+// Where each ticket rests, as a distance from the centre. The map's fold-in holds the centre (its
+// sun, or its nursery while the spec forms; the completed one, and the latest, if there are
+// several), and the rank rings step out to make room for it. Concluded research drifts out past
+// them into a belt of its own, so the open work keeps the middle. Pure, so it's testable.
+export function rests(m: WayMap) {
+  const settled = (t: Ticket) => t.status === "resolved" || t.status === "out_of_scope";
+  const folds = m.tickets.filter((t) => isFoldIn(t) && t.status !== "out_of_scope")
+    .sort((a, b) => Number(b.status === "resolved") - Number(a.status === "resolved") || b.num - a.num);
+  const centre = folds[0]?.num ?? null, shift = centre == null ? 0 : 30;
+  const belt = new Set(m.tickets.filter((t) => t.type === "research" && settled(t) && t.num !== centre).map((t) => t.num));
+  const inner = m.tickets.filter((t) => !belt.has(t.num) && t.num !== centre);
+  const beltR = ringR(Math.max(0, ...inner.map((t) => t.rank))) + shift + (inner.length ? 80 : 0);
+  const ring = (n: { num: number; rank: number }) => (n.num === centre ? 0 : belt.has(n.num) ? beltR : ringR(n.rank) + shift);
+  return { centre, belt, ring };
+}
+
 // Seed each node on its rank's ring, then relax: nodes repel, edges spring to a rest length,
 // and each node is pulled back toward its ring. Pure, so it's testable without a canvas.
-export function layout(nodes: XY[], edges: Edge[]) {
+export function layout(nodes: XY[], edges: Edge[], ring = (n: XY) => ringR(n.rank), pin: number | null = null) {
   const by: Record<number, XY> = {};
   nodes.forEach((n) => (by[n.num] = n));
   const rnd = mulberry32(1337);
   nodes.forEach((n) => {
     const ang = rnd() * TAU;
-    const R = ringR(n.rank) + (rnd() - 0.5) * 70;
+    const R = ring(n) + (rnd() - 0.5) * 70;
     n.x = Math.cos(ang) * R;
     n.y = Math.sin(ang) * R;
   });
-  const REP = 9000, SPRING = 0.02, REST = 150, RADIAL = 0.05;
+  const REP = 6500, SPRING = 0.02, REST = 120, RADIAL = 0.05;
   for (let it = 0; it < 420; it++) {
     for (let i = 0; i < nodes.length; i++) {
       const a = nodes[i];
@@ -139,10 +198,50 @@ export function layout(nodes: XY[], edges: Edge[]) {
       a.x += ux * f; a.y += uy * f; b.x -= ux * f; b.y -= uy * f;
     }
     for (const n of nodes) {
-      const d = Math.hypot(n.x, n.y) || 0.01, f = (ringR(n.rank) - d) * RADIAL;
+      if (n.num === pin) { n.x = 0; n.y = 0; continue; }
+      const d = Math.hypot(n.x, n.y) || 0.01, f = (ring(n) - d) * RADIAL;
       n.x += (n.x / d) * f; n.y += (n.y / d) * f;
     }
   }
+}
+
+// The critical chain, as edge indices: the longest run of dependencies between open tickets
+// (one of them, at a tie), plus the links the suggested path follows. Pure, so it's testable.
+export function criticalChain(m: WayMap, att: Attention) {
+  const open = new Set(m.tickets.filter((t) => t.status !== "resolved" && t.status !== "out_of_scope").map((t) => t.num));
+  const out: Record<number, number[]> = {};
+  m.edges.forEach((e, i) => { if (open.has(e.from) && open.has(e.to)) (out[e.from] ??= []).push(i); });
+  // The longest run from each ticket, guarding against a cycle.
+  const memo = new Map<number, { len: number; next: number | null }>(), busy = new Set<number>();
+  const longest = (n: number): number => {
+    const got = memo.get(n);
+    if (got) return got.len;
+    if (busy.has(n)) return 0;
+    busy.add(n);
+    let best = { len: 0, next: null as number | null };
+    for (const i of out[n] ?? []) {
+      const len = 1 + longest(m.edges[i].to);
+      if (len > best.len) best = { len, next: i };
+    }
+    busy.delete(n);
+    memo.set(n, best);
+    return best.len;
+  };
+  let start: number | null = null, top = 0;
+  for (const n of [...open].sort((a, b) => a - b)) if (longest(n) > top) { top = longest(n); start = n; }
+  const chain = new Set<number>();
+  for (let n = start, guard = 0; n != null && guard < 1000; guard++) {
+    const i = memo.get(n)?.next;
+    if (i == null || chain.has(i)) break;
+    chain.add(i);
+    n = m.edges[i].to;
+  }
+  const steps = att.path.filter((p) => p.kind === "ticket").map((p) => p.num);
+  steps.slice(1).forEach((to, k) => {
+    const i = m.edges.findIndex((e) => e.from === steps[k] && e.to === to);
+    if (i >= 0) chain.add(i);
+  });
+  return chain;
 }
 
 // Clusters: every hub (a ticket wired to three or more others), strongest first, takes the
@@ -218,7 +317,8 @@ export type Hover =
   | { kind: "cluster"; hub: number; members: number[] }
   | { kind: "slice"; num: number }
   | { kind: "dust"; anchor: number }
-  | { kind: "dest" };
+  | { kind: "dest" }
+  | { kind: "nursery" };
 
 export type EngineEvents = {
   onSelect: (num: number | null) => void;
@@ -230,7 +330,7 @@ export type EngineEvents = {
 
 const hoverKey = (h: Hover | null) =>
   !h ? "" : h.kind === "edge" ? `e${h.from}-${h.to}` : h.kind === "fog" ? `f${h.index}` : h.kind === "cluster" ? `c${h.hub}`
-    : h.kind === "slice" ? `s${h.num}` : h.kind === "dust" ? `d${h.anchor}` : h.kind === "dest" ? "dest" : `${h.kind[0]}${h.num}`;
+    : h.kind === "slice" ? `s${h.num}` : h.kind === "dust" ? `d${h.anchor}` : h.kind === "dest" || h.kind === "nursery" ? h.kind : `${h.kind[0]}${h.num}`;
 
 // Hover transitions settle in about 170 ms.
 const HOVER_TAU = 0.055;
@@ -244,7 +344,11 @@ export class Engine {
   private ec: Cam = { x: 0, y: 0, s: 1 };
   private nodes: Node[] = [];
   private edges: Edge[] = [];
-  private edgeFx: { emph: number; dim: number }[] = [];
+  private edgeFx: { emph: number; dim: number; chain: number }[] = [];
+  // The edges of the critical chain: the longest run of open dependencies, and the links the
+  // suggested path follows.
+  private critical = new Set<number>();
+  private ring = (n: { num: number; rank: number }) => ringR(n.rank);
   private byNum: Record<number, Node> = {};
   private fogPts: FogPt[] = [];
   private clusters: Cluster[] = [];
@@ -255,7 +359,9 @@ export class Engine {
   private sliceEdges: { from: number; to: number; open: boolean }[] = [];
   // The hub the map's own slices hang on, when it has any; and where the map leads.
   private hub: Anchor | null = null;
-  private dest: { x: number; y: number; text: string } | null = null;
+  private dest: { x: number; y: number; text: string; reached: boolean } | null = null;
+  // The map's own nursery, at its centre, while it has no fold-in.
+  private core: { x: number; y: number } | null = null;
   private att: Attention = { looks: {}, unlocks: {}, path: [], open: { decisions: 0, slices: 0 }, now: 0 };
   private now = Date.now();
   // Labels off: only what's hovered or selected keeps its label.
@@ -269,6 +375,8 @@ export class Engine {
   private mini: { canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D; box: { x: number; y: number; s: number } } | null = null;
   private fogSprites: HTMLCanvasElement[] = [];
   private destSprite: HTMLCanvasElement | null = null;
+  private bodySprites = new Map<string, HTMLCanvasElement>();
+  private widths = new Map<string, number>();
   private threads = new Map<number, string>();
   private mapNum: number | null = null;
   private clock = 0;
@@ -278,6 +386,12 @@ export class Engine {
   private fade = { on: false, t: 0, dur: 1.4, from: 0, to: 1 };
   private stars: { f: number; sz: number; a: number; stars: { x: number; y: number; t: number }[] }[] = [];
   private raf = 0;
+  // When the pointer, wheel or keys last did something, and when a frame was last drawn: idle,
+  // the map redraws at about 30 fps, enough for its slow drift and twinkle.
+  private lastInput = 0;
+  private lastDraw = 0;
+  // The part of the world on screen this frame, for skipping what's off it.
+  private view = { x0: 0, y0: 0, x1: 0, y1: 0 };
   private cleanup: (() => void)[] = [];
 
   constructor(private canvas: HTMLCanvasElement, private events: EngineEvents) {
@@ -313,17 +427,23 @@ export class Engine {
         enter: same && !o ? 0 : undefined,
         emph: 0, rel: 0, dim: 0,
         moon: o?.moon ?? t.num,
+        body: bodyOf(t),
       };
     });
     this.edges = m.edges;
-    this.edgeFx = m.edges.map(() => ({ emph: 0, dim: 0 }));
+    this.edgeFx = m.edges.map(() => ({ emph: 0, dim: 0, chain: 0 }));
     this.byNum = {};
     this.nodes.forEach((n) => (this.byNum[n.num] = n));
+    const rest = rests(m);
+    this.ring = rest.ring;
     if (same) {
       this.placeFresh();
     } else {
-      layout(this.nodes, this.edges);
+      layout(this.nodes, this.edges, this.ring, rest.centre);
       gather(this.nodes, this.edges);
+      // Clusters may have tugged the centre off; move everything back so it holds it.
+      const c = rest.centre != null ? this.byNum[rest.centre] : null;
+      if (c && (c.x || c.y)) { const { x, y } = c; this.nodes.forEach((n) => { n.x -= x; n.y -= y; }); }
       this.nodes.forEach((n) => { n.px = n.x; n.py = n.y; });
     }
     this.setupClusters();
@@ -332,6 +452,8 @@ export class Engine {
     this.setupSlices(m.slices ?? [], same);
     this.setupFog(m);
     this.setupDest(m);
+    this.critical = criticalChain(m, this.att);
+    this.core = nursery(m) && this.nodes.length ? { x: 0, y: 0 } : null;
     if (this.selected) this.selected = this.byNum[this.selected.num] ?? null;
     if (this.selectedSlice) this.selectedSlice = this.sliceBy[this.selectedSlice.num] ?? null;
     this.setHover(null);
@@ -458,7 +580,7 @@ export class Engine {
         sn.ox = Math.cos(t) * D; sn.oy = Math.sin(t) * D;
       });
     };
-    for (const [p, group] of Object.entries(this.kids)) place(group, COL[this.byNum[Number(p)].status].r);
+    for (const [p, group] of Object.entries(this.kids)) place(group, this.coreR(this.byNum[Number(p)]));
     if (loose.length) place(loose, 6);
     this.sliceEdges = this.slices.flatMap((sn) =>
       sn.dust ? [] : sn.blockers.filter((b) => this.sliceBy[b.num] && !this.sliceBy[b.num].dust).map((b) => ({ from: b.num, to: sn.num, open: b.open })),
@@ -471,6 +593,12 @@ export class Engine {
     return n / Math.max(1, this.ec.s);
   }
 
+  // Whether a circle of radius r around (x, y) reaches the screen.
+  private seen(x: number, y: number, r: number) {
+    const v = this.view;
+    return x + r > v.x0 && x - r < v.x1 && y + r > v.y0 && y - r < v.y1;
+  }
+
   // The radius of an anchor's dust ring, for a star (or hub) of radius r.
   private dustR(r: number) {
     return r + 30;
@@ -478,19 +606,19 @@ export class Engine {
 
   // An open slice's radius: larger the more it frees.
   private sliceR(sn: SNode) {
-    return SLICE_R * Math.min(2.2, 1 + 0.3 * Math.sqrt(this.att.unlocks[sn.num] ?? 0));
+    return SLICE_R * Math.min(1.8, 1 + 0.3 * Math.sqrt(this.att.unlocks[sn.num] ?? 0));
   }
 
   private anchorOf(sn: SNode): Anchor | null {
     if (sn.parent == null) return this.hub;
     const n = this.byNum[sn.parent];
-    return n ? { num: n.num, _x: n._x, _y: n._y, r: COL[n.status].r } : null;
+    return n ? { num: n.num, _x: n._x, _y: n._y, r: this.coreR(n) } : null;
   }
 
   // Where the map leads: past the rim, beyond its outermost tickets.
   private setupDest(m: WayMap) {
     this.dest = null;
-    if (!this.att.path.length || !this.nodes.length) return;
+    if (!this.nodes.length) return;
     let cx = 0, cy = 0;
     this.nodes.forEach((n) => { cx += n.x; cy += n.y; });
     cx /= this.nodes.length; cy /= this.nodes.length;
@@ -499,7 +627,7 @@ export class Engine {
     const top = Math.max(...this.nodes.map((n) => n.rank)), outer = this.nodes.filter((n) => n.rank === top);
     const ox = outer.reduce((a, n) => a + n.x, 0) / outer.length - cx, oy = outer.reduce((a, n) => a + n.y, 0) / outer.length - cy;
     // Beyond the outermost tickets, turned aside (a little at a time) until clear of the fog.
-    const base = Math.hypot(ox, oy) > 1 ? Math.atan2(oy, ox) : -Math.PI / 4, R = rim + 190;
+    const base = Math.hypot(ox, oy) > 1 ? Math.atan2(oy, ox) : -Math.PI / 4, R = rim + 115;
     const clear = (t: number) => Math.min(1e9, ...this.fogPts.map((f) => Math.hypot(cx + Math.cos(t) * R - f.x, cy + Math.sin(t) * R - f.y)));
     let ang = base;
     for (let i = 1; i <= 16 && clear(ang) < 260; i++) {
@@ -507,7 +635,7 @@ export class Engine {
       if (clear(t) > clear(ang)) ang = t;
     }
     const first = m.destination.split(/(?<=[.!?])\s|\n/)[0].replace(/[*_`#>]/g, "").trim();
-    this.dest = { x: cx + Math.cos(ang) * R, y: cy + Math.sin(ang) * R, text: first };
+    this.dest = { x: cx + Math.cos(ang) * R, y: cy + Math.sin(ang) * R, text: first, reached: !m.open };
   }
 
   // Ease the camera so the star sits centred in the space the panel leaves.
@@ -535,23 +663,23 @@ export class Engine {
       }
       const ang = rnd() * TAU;
       if (anchor) { n.x = anchor.x + Math.cos(ang) * 120; n.y = anchor.y + Math.sin(ang) * 120; }
-      else { n.x = Math.cos(ang) * ringR(n.rank); n.y = Math.sin(ang) * ringR(n.rank); }
+      else { n.x = Math.cos(ang) * this.ring(n); n.y = Math.sin(ang) * this.ring(n); }
     }
     for (let it = 0; it < 200; it++) {
       for (const n of fresh) {
         let fx = 0, fy = 0;
         for (const o of this.nodes) {
           if (o === n) continue;
-          const dx = n.x - o.x, dy = n.y - o.y, d2 = dx * dx + dy * dy || 0.01, d = Math.sqrt(d2), f = 9000 / d2;
+          const dx = n.x - o.x, dy = n.y - o.y, d2 = dx * dx + dy * dy || 0.01, d = Math.sqrt(d2), f = 6500 / d2;
           fx += (dx / d) * f; fy += (dy / d) * f;
         }
         for (const e of this.edges) {
           const o = e.from === n.num ? this.byNum[e.to] : e.to === n.num ? this.byNum[e.from] : null;
           if (!o) continue;
-          const dx = o.x - n.x, dy = o.y - n.y, d = Math.hypot(dx, dy) || 0.01, f = (d - 150) * 0.02;
+          const dx = o.x - n.x, dy = o.y - n.y, d = Math.hypot(dx, dy) || 0.01, f = (d - 120) * 0.02;
           fx += (dx / d) * f; fy += (dy / d) * f;
         }
-        const d = Math.hypot(n.x, n.y) || 0.01, rf = (ringR(n.rank) - d) * 0.05;
+        const d = Math.hypot(n.x, n.y) || 0.01, rf = (this.ring(n) - d) * 0.05;
         n.x += fx + (n.x / d) * rf; n.y += fy + (n.y / d) * rf;
       }
     }
@@ -572,7 +700,7 @@ export class Engine {
     cx /= this.nodes.length; cy /= this.nodes.length;
     let rim = 0;
     this.nodes.forEach((n) => (rim = Math.max(rim, Math.hypot(n.x - cx, n.y - cy))));
-    rim += 130;
+    rim += 60;
     const rnd = mulberry32(4242);
     m.fog.forEach((f, i) => {
       const anc = f.clearsWith != null ? this.byNum[f.clearsWith] ?? null : null;
@@ -587,11 +715,13 @@ export class Engine {
     const grow = (x: number, y: number, r: number) => {
       minx = Math.min(minx, x - r); miny = Math.min(miny, y - r); maxx = Math.max(maxx, x + r); maxy = Math.max(maxy, y + r);
     };
+    // The tickets and the destination in full; the open questions' clouds only to their middles,
+    // so the map, not its haze, fills the screen.
     this.nodes.forEach((n) => grow(n.x, n.y, 0));
-    if (this.hub) grow(this.hub._x, this.hub._y, 120);
-    if (this.dest) grow(this.dest.x, this.dest.y, 100);
-    this.fogPts.forEach((f) => grow(f.x, f.y, 90));
-    const pad = 70;
+    if (this.hub) grow(this.hub._x, this.hub._y, 90);
+    if (this.dest) grow(this.dest.x, this.dest.y, 50);
+    this.fogPts.forEach((f) => grow(f.x, f.y, 0));
+    const pad = 40;
     minx -= pad; miny -= pad; maxx += pad; maxy += pad;
     // Clear of the top bar, the bottom bar and (on wide screens) the legend on the left.
     const top = 64, bottom = 96, left = innerWidth > 900 ? 250 : 0;
@@ -620,16 +750,56 @@ export class Engine {
     this.goal.y = py - wy * ns;
   }
 
-  // The radius a star draws at, grown by up to 20% while hovered.
+  // The radius of a ticket's body at rest: a decision star's by its status; the others by their
+  // form, a little smaller once they're settled.
+  private coreR(n: Node) {
+    const settled = n.status === "resolved" || n.status === "out_of_scope";
+    switch (n.body) {
+      case "sun": return n.status === "out_of_scope" ? 13.5 : 21;
+      case "nursery": return 12;
+      case "nebula": return settled ? 9 : 11;
+      case "protostar": return settled ? 5 : 6.5;
+      default: return COL[n.status].r;
+    }
+  }
+
+  // The radius a ticket draws at, grown by up to 20% while hovered.
   private radius(n: Node) {
-    return COL[n.status].r * (1 + 0.2 * n.emph);
+    return this.coreR(n) * (1 + 0.2 * n.emph);
+  }
+
+  // Where a fold-in's build ring sits: snug round a sun, so it stays the size it was.
+  private ringAt(n: Node) {
+    return this.radius(n) + (n.body === "sun" ? 7 : 10);
   }
 
   // Where a live thread's moon is now, in world space, on its tilted orbit.
   private moonAt(n: Node) {
-    const r = COL[n.status].r, rx = r + 20, ry = (r + 20) * 0.42, tilt = -0.55;
+    // Clear of a painted body's disk or cloud, not through it.
+    const k = n.body === "protostar" ? 3.6 : n.body === "nebula" ? 2.6 : 1;
+    const r = this.coreR(n) * k, rx = r + 20, ry = (r + 20) * 0.42, tilt = -0.55;
     const ox = Math.cos(n.moon) * rx, oy = Math.sin(n.moon) * ry;
     return { x: n._x + ox * Math.cos(tilt) - oy * Math.sin(tilt), y: n._y + ox * Math.sin(tilt) + oy * Math.cos(tilt), rx, ry, tilt };
+  }
+
+  // The indices of the edges in a ticket's dependency chain: everything upstream of it and
+  // everything downstream, transitively.
+  private chainOf(num: number) {
+    const out = new Set<number>();
+    const walk = (start: number, up: boolean) => {
+      const seen = new Set([start]), stack = [start];
+      while (stack.length) {
+        const n = stack.pop()!;
+        this.edges.forEach((e, i) => {
+          if ((up ? e.to : e.from) !== n) return;
+          out.add(i);
+          const m = up ? e.from : e.to;
+          if (!seen.has(m)) { seen.add(m); stack.push(m); }
+        });
+      }
+    };
+    walk(num, true); walk(num, false);
+    return out;
   }
 
   // The control point of the gentle curve an edge draws along.
@@ -658,7 +828,7 @@ export class Engine {
   // Where a slice's thread moon sits: on its dashed ring, low on the left, clear of the label
   // and of the check moons.
   private sliceMoonAt(sn: SNode) {
-    const R = this.sliceR(sn) + this.px(sn.look === "you" ? 10 : 6), t = Math.PI * 0.75;
+    const R = this.sliceR(sn) + this.px(6), t = Math.PI * 0.75;
     return { x: sn._x + Math.cos(t) * R, y: sn._y + Math.sin(t) * R, R };
   }
 
@@ -731,7 +901,7 @@ export class Engine {
     for (const n of this.nodes) {
       const prog = this.progress(n), kids = this.kids[n.num];
       const count = kids ? kids.filter((k) => k.dust && k.state === "built").length : prog?.[0] ?? 0;
-      if (count) out.push({ a: { num: n.num, _x: n._x, _y: n._y, r: COL[n.status].r }, count, vis: kids ? Math.max(...kids.map((k) => k.vis)) : 0 });
+      if (count) out.push({ a: { num: n.num, _x: n._x, _y: n._y, r: this.coreR(n) }, count, vis: kids ? Math.max(...kids.map((k) => k.vis)) : 0 });
     }
     if (this.hub) {
       const loose = this.slices.filter((sn) => sn.parent == null);
@@ -748,6 +918,12 @@ export class Engine {
       if (Math.abs(d - R) < Math.max(7, 6 * this.ec.s)) return g.a.num;
     }
     return null;
+  }
+
+  private pickCore(mx: number, my: number) {
+    if (!this.core) return false;
+    const p = this.w2s(this.core);
+    return Math.hypot(p.x - mx, p.y - my) < Math.max(16, 45 * this.ec.s);
   }
 
   private pickDest(mx: number, my: number) {
@@ -768,6 +944,7 @@ export class Engine {
     const dust = this.pickDust(mx, my);
     if (dust != null) return { kind: "dust", anchor: dust };
     if (this.pickDest(mx, my)) return { kind: "dest" };
+    if (this.pickCore(mx, my)) return { kind: "nursery" };
     const e = this.pickEdge(mx, my);
     if (e) return { kind: "edge", from: e.from, to: e.to, satisfied: e.satisfied };
     const f = this.pickFog(mx, my);
@@ -780,7 +957,7 @@ export class Engine {
   private setHover(h: Hover | null) {
     if (hoverKey(h) === hoverKey(this.hover)) return;
     this.hover = h;
-    this.canvas.classList.toggle("pointer", !!h && h.kind !== "cluster" && h.kind !== "edge" && h.kind !== "dest" && !(h.kind === "dust" && h.anchor < 0));
+    this.canvas.classList.toggle("pointer", !!h && h.kind !== "cluster" && h.kind !== "edge" && h.kind !== "dest" && h.kind !== "nursery" && !(h.kind === "dust" && h.anchor < 0));
     this.events.onHover(h);
   }
 
@@ -808,6 +985,8 @@ export class Engine {
       this.cleanup.push(() => t.removeEventListener(ev, f as EventListener, o));
     };
     on(window, "resize", this.resize);
+    const stamp = () => { this.lastInput = performance.now(); };
+    for (const ev of ["pointermove", "pointerdown", "wheel", "touchmove", "keydown"]) on(window, ev, stamp, { passive: true });
     on(c, "mousedown", (e: MouseEvent) => { down = true; moved = 0; last = { x: e.clientX, y: e.clientY }; c.classList.add("drag"); });
     on(c, "mousemove", (e: MouseEvent) => { this.pointer = down ? null : { x: e.clientX, y: e.clientY }; });
     on(c, "mouseleave", () => { this.pointer = null; });
@@ -815,7 +994,8 @@ export class Engine {
       if (!down) return;
       const dx = e.clientX - last.x, dy = e.clientY - last.y;
       moved += Math.abs(dx) + Math.abs(dy);
-      this.goal.x += dx; this.goal.y += dy;
+      // A drag moves the map under the pointer at once; easing it would trail behind the hand.
+      this.goal.x += dx; this.goal.y += dy; this.cam.x += dx; this.cam.y += dy;
       last = { x: e.clientX, y: e.clientY };
     });
     on(window, "mouseup", (e: MouseEvent) => {
@@ -829,6 +1009,9 @@ export class Engine {
       // Lines (Firefox mouse wheels) and pages count as pixels; about 33% per notch.
       const dy = e.deltaY * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? innerHeight : 1);
       this.zoomAt(e.clientX, e.clientY, clamp(this.goal.s * Math.exp(-dy * 0.004), 0.15, 4));
+      // A trackpad (a pinch, or a scroll's many small steps) zooms at once, under the fingers; a
+      // mouse wheel's notches, a third each, glide.
+      if (e.ctrlKey || Math.abs(dy) < 40) Object.assign(this.cam, this.goal);
     }, { passive: false });
     const pinchState = (e: TouchEvent) => {
       const a = e.touches[0], b = e.touches[1];
@@ -845,11 +1028,12 @@ export class Engine {
         const p = pinchState(e);
         this.zoomAt(p.cx, p.cy, clamp(this.goal.s * (p.d / pinch.d), 0.15, 4));
         this.goal.x += p.cx - pinch.cx; this.goal.y += p.cy - pinch.cy;
+        Object.assign(this.cam, this.goal);
         pinch = p;
       } else if (down && e.touches.length === 1) {
         const t = e.touches[0], dx = t.clientX - last.x, dy = t.clientY - last.y;
         moved += Math.abs(dx) + Math.abs(dy);
-        this.goal.x += dx; this.goal.y += dy;
+        this.goal.x += dx; this.goal.y += dy; this.cam.x += dx; this.cam.y += dy;
         last = { x: t.clientX, y: t.clientY };
       }
     }, { passive: false });
@@ -864,6 +1048,7 @@ export class Engine {
     on(c, "gesturechange", (e: Event & { scale?: number; clientX?: number; clientY?: number }) => {
       e.preventDefault();
       this.zoomAt(e.clientX ?? innerWidth / 2, e.clientY ?? innerHeight / 2, clamp(gestureS0 * (e.scale ?? 1), 0.15, 4));
+      Object.assign(this.cam, this.goal);
     });
   }
 
@@ -927,11 +1112,15 @@ export class Engine {
       const thread = this.threads.get(n.num);
       if (thread && !(h?.kind === "moon" && h.num === n.num)) n.moon += dt * (thread === "running" || thread === "starting" ? 1.9 : 0.6);
     }
+    // Selected, a ticket's whole chain stands out, what it waits on and what waits on it, further
+    // down too; otherwise the critical chain does.
+    const chain = this.selected ? this.chainOf(this.selected.num) : this.critical;
     this.edges.forEach((e, i) => {
       const fx = this.edgeFx[i];
       const inCluster = hubFocus && hubFocus.members.some((m) => m.num === e.from) && hubFocus.members.some((m) => m.num === e.to);
       fx.emph = ease(fx.emph, litEdges.has(i) ? 1 : 0);
       fx.dim = ease(fx.dim, focusing && !litEdges.has(i) && !inCluster ? 1 : 0);
+      fx.chain = ease(fx.chain, chain.has(i) ? 1 : 0);
     });
     for (const f of this.fogPts) f.emph = ease(f.emph, h?.kind === "fog" && h.index === f.index ? 1 : 0);
     for (const c of this.clusters) {
@@ -985,6 +1174,8 @@ export class Engine {
       if (g) a = { ...this.w2s(g.a), r: (this.dustR(g.a.r) + 8) * this.ec.s };
     } else if (h?.kind === "dest" && this.dest) {
       a = { ...this.w2s(this.dest), r: 24 * this.ec.s + 10 };
+    } else if (h?.kind === "nursery" && this.core) {
+      a = { ...this.w2s(this.core), r: 45 * this.ec.s + 10 };
     }
     if (!a || this.mapAlpha < 0.5) { el.dataset.show = ""; return; }
     const w = el.offsetWidth, ht = el.offsetHeight, right = innerWidth - this.panelW - 12;
@@ -1098,7 +1289,8 @@ export class Engine {
     const vis = Math.min(a.vis, b.vis);
     if (vis < 0.02) return;
     const hi = Math.max(a.emph, b.emph);
-    ctx.globalAlpha = this.mapAlpha * vis * (1 - 0.75 * Math.min(a.dim, b.dim));
+    const sel = this.selectedSlice === a || this.selectedSlice === b ? 1 : 0;
+    ctx.globalAlpha = this.mapAlpha * vis * (1 - 0.75 * Math.min(a.dim, b.dim)) * (0.3 + 0.7 * Math.max(hi, sel));
     const col = e.open ? "255,96,96" : "120,170,255";
     const dx = b._x - a._x, dy = b._y - a._y, len = Math.hypot(dx, dy) || 1, ux = dx / len, uy = dy / len;
     const ra = this.sliceR(a) + 3, rb = this.sliceR(b) + 4;
@@ -1115,38 +1307,49 @@ export class Engine {
     ctx.globalAlpha = this.mapAlpha;
   }
 
-  // An open slice: a small planet in its look's colour, sized by what it frees. Waiting on you
-  // carries a gold halo; blocked is hollow; stalled is dull rust with no glow. Its open checks are
+  // An open slice: a small planet in its look's colour, sized by what it frees. Blocked is hollow; stalled is dull rust with no glow. Its open checks are
   // small fixed satellites (gold for the owner, blue for an agent), and a live T3 thread a dashed
   // ring that turns.
   private drawSlice(sn: SNode) {
-    if (sn.vis < 0.02 || sn.dust) return;
+    if (sn.vis < 0.02 || sn.dust || !this.seen(sn._x, sn._y, this.sliceR(sn) * 4 + 30)) return;
     const ctx = this.ctx, col = LCOL[sn.look], x = sn._x, y = sn._y;
     const searched = this.match != null && !this.match.has(sn.num) ? 0.2 : 1;
     ctx.globalAlpha = this.mapAlpha * sn.vis * searched * (1 - 0.7 * sn.dim);
     const r = this.sliceR(sn) * (1 + 0.2 * sn.emph) * (0.6 + 0.4 * sn.vis);
     if (sn.look !== "stalled" && sn.look !== "dropped") {
-      const gr = r * (sn.look === "you" ? 4.2 : 3);
+      const gr = r * 3;
       const g = ctx.createRadialGradient(x, y, 0, x, y, gr);
       g.addColorStop(0, hexA(col, (sn.look === "blocked" ? 0.18 : 0.38) + 0.2 * sn.emph)); g.addColorStop(1, hexA(col, 0));
       ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, gr, 0, TAU); ctx.fill();
     }
-    if (sn.look === "blocked" || sn.look === "dropped") {
+    if (sn.look === "dropped") {
       ctx.fillStyle = hexA(col, 0.14); ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.fill();
       ctx.strokeStyle = hexA(col, 0.9); ctx.lineWidth = 1.4; ctx.stroke();
     } else {
-      // Lit from the upper left.
-      const sg = ctx.createRadialGradient(x - r * 0.35, y - r * 0.4, r * 0.1, x, y, r);
-      if (sn.look === "stalled") {
-        sg.addColorStop(0, "#e9a27c"); sg.addColorStop(0.45, "#b45a35"); sg.addColorStop(1, "#5c2617");
+      // Lit by its sun (the fold-in it orbits, or the hub): bright on that side, falling to
+      // shadow past the terminator, with a thin lit rim. Its surface is painted, a world in its
+      // look's colours, slightly tilted its own way; a plain shaded sphere until that loads.
+      const an = this.anchorOf(sn), d = an ? Math.hypot(an._x - x, an._y - y) : 0;
+      const lx = d ? (an!._x - x) / d : -0.6, ly = d ? (an!._y - y) / d : -0.8;
+      const lit = sn.look === "stalled" ? "#e9a27c" : col, kind = WORLD[sn.look];
+      const img = kind && texture(kind, sn.num * 7 + 3, TINT[sn.look] ?? null, 2 * r * this.ec.s * this.dpr);
+      const sg = ctx.createRadialGradient(x + lx * r * 0.5, y + ly * r * 0.5, r * 0.05, x + lx * r * 0.25, y + ly * r * 0.25, r * 1.2);
+      if (img) {
+        ctx.save(); ctx.translate(x, y); ctx.rotate(((sn.num * 0.618) % 1) - 0.5);
+        ctx.drawImage(img, -r, -r, 2 * r, 2 * r); ctx.restore();
+        const sx = x + lx * r * 0.55, sy = y + ly * r * 0.55, sh = ctx.createRadialGradient(sx, sy, 0, sx, sy, r * 1.75);
+        sh.addColorStop(0, "rgba(255,255,255,0.1)"); sh.addColorStop(0.4, "rgba(0,0,0,0)");
+        sh.addColorStop(0.75, "rgba(2,4,12,0.72)"); sh.addColorStop(1, "rgba(2,4,12,0.92)");
+        ctx.fillStyle = sh; ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.fill();
+      } else if (sn.look === "stalled") {
+        sg.addColorStop(0, "#f6c9ae"); sg.addColorStop(0.3, "#b45a35"); sg.addColorStop(0.7, "#4a1d10"); sg.addColorStop(1, "#1c0b06");
       } else {
-        sg.addColorStop(0, "#ffffff"); sg.addColorStop(0.3, hexA(col, 1)); sg.addColorStop(1, shade(col, 0.45));
+        sg.addColorStop(0, "#ffffff"); sg.addColorStop(0.25, hexA(col, 1)); sg.addColorStop(0.68, shade(col, 0.55)); sg.addColorStop(1, shade(col, 0.88));
       }
-      ctx.fillStyle = sg; ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.fill();
-    }
-    if (sn.look === "you") {
-      ctx.strokeStyle = hexA(GOLD, 0.85); ctx.lineWidth = this.px(1.5);
-      ctx.beginPath(); ctx.arc(x, y, r + this.px(5), 0, TAU); ctx.stroke();
+      if (!img) { ctx.fillStyle = sg; ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.fill(); }
+      const ang = Math.atan2(ly, lx);
+      ctx.strokeStyle = hexA(lit, 0.75); ctx.lineWidth = Math.min(r * 0.25, this.px(1));
+      ctx.beginPath(); ctx.arc(x, y, r - ctx.lineWidth / 2, ang - 1.2, ang + 1.2); ctx.stroke();
     }
     // A live T3 thread on it: a dashed ring that turns, with a moon on it to click, which opens
     // the thread. Hovered, the moon grows.
@@ -1162,17 +1365,18 @@ export class Engine {
       ctx.fillStyle = mg; ctx.beginPath(); ctx.arc(m.x, m.y, gr, 0, TAU); ctx.fill();
       ctx.fillStyle = "#f1ebff"; ctx.beginPath(); ctx.arc(m.x, m.y, this.px(2.6 * (1 + 0.4 * mh)), 0, TAU); ctx.fill();
     }
-    // An open agent check is a small blue moon, one per check, up and to the left, clear of the
-    // label. An owner check needs no moon: it's what makes the slice gold, and the label names it.
-    sn.checks.filter((c) => c.open && c.kind !== "owner").slice(0, 3).forEach((c, i) => {
-      const t = -Math.PI * 0.75 + (i - 1) * 0.6, d = r + this.px(sn.look === "you" ? 11 : 7);
+    // Its open checks are satellites, one per check (owner ones first, gold; an agent's blue),
+    // up and to the left, clear of the label. They stay with it after its PR merges.
+    const open = sn.checks.filter((c) => c.open).sort((p, q) => Number(q.kind === "owner") - Number(p.kind === "owner"));
+    open.slice(0, 4).forEach((c, i) => {
+      const t = -Math.PI * 0.5 - i * 0.5, d = r + this.px(7);
       const mx = x + Math.cos(t) * d, my = y + Math.sin(t) * d, mc = c.kind === "owner" ? GOLD : LCOL.building;
       ctx.fillStyle = hexA(mc, 0.3); ctx.beginPath(); ctx.arc(mx, my, this.px(4.2), 0, TAU); ctx.fill();
       ctx.fillStyle = mc; ctx.beginPath(); ctx.arc(mx, my, this.px(2.2), 0, TAU); ctx.fill();
     });
     if (this.selectedSlice === sn) {
       ctx.strokeStyle = "rgba(255,255,255,0.9)"; ctx.lineWidth = this.px(1.4);
-      ctx.beginPath(); ctx.arc(x, y, r + this.px(sn.look === "you" ? 9 : 6), 0, TAU); ctx.stroke();
+      ctx.beginPath(); ctx.arc(x, y, r + this.px(6), 0, TAU); ctx.stroke();
     }
     ctx.globalAlpha = this.mapAlpha;
   }
@@ -1188,12 +1392,12 @@ export class Engine {
       else if (st.kind === "ticket") {
         // Clear of the build ring, when it has one.
         const n = this.byNum[st.num];
-        p = n && { x: n._x, y: n._y, r: this.progress(n) ? COL[n.status].r + 15 + this.px(9) : this.radius(n) + 8, kind: "ticket" };
+        p = n && { x: n._x, y: n._y, r: this.progress(n) ? this.ringAt(n) + this.px(9) : this.radius(n) + 8, kind: "ticket" };
       }
       else {
         const sn = this.sliceBy[st.num], a = sn && this.anchorOf(sn);
-        if (sn && sn.vis > 0.5 && !sn.dust) p = { x: sn._x, y: sn._y, r: this.sliceR(sn) + this.px(sn.look === "you" ? 10 : 6), kind: "slice" };
-        else if (a) p = { x: a._x, y: a._y, r: a.r + 15 + this.px(9), kind: "ticket" };
+        if (sn && sn.vis > 0.5 && !sn.dust) p = { x: sn._x, y: sn._y, r: this.sliceR(sn) + this.px(6), kind: "slice" };
+        else if (a) p = { x: a._x, y: a._y, r: a.r + 10 + this.px(9), kind: "ticket" };
       }
       const last = pts[pts.length - 1];
       if (p && !(last && Math.hypot(last.x - p.x, last.y - p.y) < 1)) pts.push(p);
@@ -1298,12 +1502,22 @@ export class Engine {
     return c;
   }
 
+  // The map's own nursery, at the centre its decisions ring.
+  private drawCore() {
+    const c = this.core;
+    if (!c || this.mapNum == null) return;
+    const hi = this.hover?.kind === "nursery" ? 1 : 0;
+    if (!this.drawTex("nursery", this.mapNum, palette("nursery", "frontier"), c.x, c.y, 115, 0.7 + 0.2 * hi, TAU)) this.drawCloud(this.nurserySprite(this.mapNum), c.x, c.y, 100, 0.85 + 0.15 * hi);
+  }
+
   private drawDest() {
     const d = this.dest;
     if (!d) return;
     const ctx = this.ctx, hi = this.hover?.kind === "dest" ? 1 : 0, R = DEST_R;
     const sprite = (this.destSprite ??= this.paintDest());
-    ctx.globalAlpha = this.mapAlpha * (0.88 + 0.12 * hi);
+    // While the goal is open it breathes, slowly; reached, it holds steady and bright.
+    const breath = d.reached ? 1 : 0.86 + 0.08 * Math.sin(this.clock * 1.3);
+    ctx.globalAlpha = this.mapAlpha * Math.min(1, breath + 0.12 * hi);
     ctx.drawImage(sprite, d.x - R, d.y - R, R * 2, R * 2);
     if (hi) {
       ctx.strokeStyle = "rgba(210,190,255,0.45)"; ctx.lineWidth = this.px(1.2);
@@ -1340,7 +1554,7 @@ export class Engine {
       const loud = sn.look === "you" || sn.look === "stalled";
       if (!focus && (!this.labels || (!loud && s < 0.7))) continue;
       const full = focus || s >= 1.05, un = this.att.unlocks[sn.num] ?? 0;
-      const p = this.w2s(sn), r = this.sliceR(sn) * s + (sn.look === "you" ? 6.5 * Math.min(1, s) : 0);
+      const p = this.w2s(sn), r = this.sliceR(sn) * s;
       const lx = p.x + r + 8, lh = fs + 3;
       const title = full ? "  " + (sn.title.length > 28 ? sn.title.slice(0, 27) + "…" : sn.title) : "";
       const lines: { text: string; col: string; font: string }[] = [];
@@ -1348,10 +1562,10 @@ export class Engine {
       if (full && un > 0) lines.push({ text: `unlocks ${un}`, col: "#9aa6bd", font: `${(fs - 1.5).toFixed(1)}px` });
       const num = `#${sn.num}`;
       ctx.font = `600 ${(fs - 0.5).toFixed(1)}px ui-sans-serif,system-ui,sans-serif`;
-      const nw = ctx.measureText(num).width;
+      const nw = this.textW(num, fs - 0.5, true);
       ctx.font = `${(fs - 1).toFixed(1)}px ui-sans-serif,system-ui,sans-serif`;
-      let w = nw + (title ? ctx.measureText(title).width : 0);
-      for (const l of lines) { ctx.font = `${l.font} ui-sans-serif,system-ui,sans-serif`; w = Math.max(w, ctx.measureText(l.text).width); }
+      let w = nw + (title ? this.textW(title, fs - 1) : 0);
+      for (const l of lines) w = Math.max(w, this.textW(l.text, parseFloat(l.font)));
       const h = lh * (1 + lines.length), ly = p.y - (h - lh) / 2;
       const hit = (q: { x: number; y: number; w: number; h?: number }) =>
         lx < q.x + q.w + 4 && lx + w + 4 > q.x && ly - lh / 2 < q.y - (q.h ?? lh) / 2 + (q.h ?? lh) && ly - lh / 2 + h > q.y - (q.h ?? lh) / 2;
@@ -1408,8 +1622,8 @@ export class Engine {
     const ctx = this.ctx, lw = 1 / this.ec.s;
     ctx.lineWidth = lw;
     ctx.strokeStyle = "rgba(120,140,210,0.06)";
-    for (const r of new Set(this.nodes.map((n) => n.rank))) {
-      ctx.beginPath(); ctx.arc(0, 0, ringR(r), 0, TAU); ctx.stroke();
+    for (const r of new Set(this.nodes.map(this.ring))) {
+      if (r > 0) { ctx.beginPath(); ctx.arc(0, 0, r, 0, TAU); ctx.stroke(); }
     }
     for (const c of this.clusters) {
       const base = 1 - 0.7 * c.dim, glow = c.emph;
@@ -1456,7 +1670,9 @@ export class Engine {
     const ctx = this.ctx, fx = this.edgeFx[i];
     const { ax, ay, bx, by, cx, cy, len } = this.curve(a, b);
     const searched = this.match != null && !this.match.has(a.num) && !this.match.has(b.num) ? 0.15 : 1;
-    ctx.globalAlpha = this.mapAlpha * searched * (1 - 0.8 * fx.dim);
+    // Off the chain an edge is a faint trace; on it, or hovered, it's drawn in full.
+    const on = Math.max(fx.chain, fx.emph);
+    ctx.globalAlpha = this.mapAlpha * searched * (1 - 0.8 * fx.dim) * (0.22 + 0.78 * on);
     const col = e.satisfied ? "120,170,255" : "255,96,96", hi = fx.emph;
     if (hi > 0.01) {
       ctx.strokeStyle = `rgba(${col},${0.25 * hi})`; ctx.lineWidth = 7;
@@ -1489,59 +1705,47 @@ export class Engine {
     ctx.globalAlpha = this.mapAlpha;
   }
 
+  // A ticket's body, by its form (see Body), in its status's colour. Open decisions and
+  // prototypes keep their status rings; a fold-in's sun carries its build ring.
   private drawNode(n: Node) {
     const ctx = this.ctx, c = COL[n.status], x = n._x, y = n._y;
+    if (!this.seen(x, y, this.coreR(n) * 6 + 60)) return;
     const en = n.enter ?? 1, fl = n.flare, hi = n.emph, near = n.rel;
-    const isF = n.status === "frontier", isC = n.status === "claimed", isB = n.status === "blocked";
+    const isF = n.status === "frontier", isC = n.status === "claimed";
     const beat = 0.5 + 0.5 * Math.sin(this.clock * 2.8);
-    const pulse = isF ? 0.8 + 0.2 * beat : 1;
-    const grow = 1 + 0.2 * hi;
+    const grow = 1 + 0.2 * hi, cr = this.coreR(n) * (0.4 + 0.6 * en) * grow;
     ctx.globalAlpha = this.mapAlpha * this.vis(n);
-    const gr = (isF ? c.gr * (0.92 + 0.16 * beat) : c.gr) * (0.55 + 0.45 * en) * (1 + fl * 0.5) * (1 + 0.45 * hi + 0.15 * near);
-    const g = ctx.createRadialGradient(x, y, 0, x, y, gr);
-    g.addColorStop(0, hexA(c.glow, Math.min(1, (0.85 * pulse + fl * 0.5 + 0.15 * hi) * en)));
-    g.addColorStop(0.35, hexA(c.glow, (0.26 * pulse + 0.14 * hi + 0.08 * near) * en));
-    g.addColorStop(1, hexA(c.glow, 0));
-    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, gr, 0, TAU); ctx.fill();
-    const cr = c.r * (0.4 + 0.6 * en) * grow;
-    if (isB) {
-      // Blocked: a faceted red gem rather than a star.
-      const d = cr * 1.35;
-      const lg = ctx.createLinearGradient(x - d, y - d, x + d, y + d);
-      lg.addColorStop(0, "#ffd0c8"); lg.addColorStop(0.45, c.core); lg.addColorStop(1, "#d8323a");
-      ctx.fillStyle = lg;
-      ctx.beginPath(); ctx.moveTo(x, y - d); ctx.lineTo(x + d, y); ctx.lineTo(x, y + d); ctx.lineTo(x - d, y); ctx.closePath(); ctx.fill();
-      ctx.fillStyle = "rgba(255,255,255,0.35)";
-      ctx.beginPath(); ctx.moveTo(x, y - d); ctx.lineTo(x + d * 0.5, y - d * 0.5); ctx.lineTo(x, y); ctx.lineTo(x - d * 0.5, y - d * 0.5); ctx.closePath(); ctx.fill();
-    } else {
-      const cg = ctx.createRadialGradient(x, y, 0, x, y, cr * 1.35);
-      cg.addColorStop(0, "#ffffff"); cg.addColorStop(0.35, hexA(c.core, 1));
-      cg.addColorStop(0.72, hexA(c.glow, 0.95)); cg.addColorStop(1, hexA(c.glow, 0));
-      ctx.fillStyle = cg; ctx.beginPath(); ctx.arc(x, y, cr * 1.35, 0, TAU); ctx.fill();
-      // Resolved stars get a thin rim, like a closed ring.
-      if (n.status === "resolved") {
-        ctx.strokeStyle = hexA(c.core, 0.55); ctx.lineWidth = 1;
-        ctx.beginPath(); ctx.arc(x, y, cr + 1.6, 0, TAU); ctx.stroke();
-      }
+    if (n.body === "star") this.drawStar(n, x, y, cr, isF ? 0.8 + 0.2 * beat : 1);
+    else if (n.body === "nebula") {
+      // Concluded, it turns slowly where it drifted out to, each its own way.
+      const settled = n.status === "resolved" || n.status === "out_of_scope";
+      const drift = settled ? this.clock * 0.03 * (n.num % 2 ? 1 : -1) : 0;
+      if (!this.drawTex("nebula", n.num, palette("nebula", n.status, n.num), x, y, cr * (settled ? 5.5 : 4.2), (settled ? 0.75 : 0.9) + 0.25 * hi, TAU, 0.12, drift)) this.drawCloud(this.nebulaSprite(n), x, y, cr * 3.8, 0.9 + 0.1 * hi);
+    } else if (n.body === "nursery") {
+      if (!this.drawTex("nursery", n.num, palette("nursery", n.status), x, y, cr * 3.8, 0.85 + 0.15 * hi, TAU)) this.drawCloud(this.nurserySprite(n.num), x, y, cr * 3.4, 0.85 + 0.15 * hi);
     }
+    else if (n.body === "protostar") this.drawProtostar(n, x, y, cr);
+    else this.drawSun(n, x, y, cr);
     if (fl > 0) {
       ctx.strokeStyle = hexA(c.core, fl * 0.7); ctx.lineWidth = 1.5 + 2 * fl;
-      ctx.beginPath(); ctx.arc(x, y, c.r + (1 - fl) * 40, 0, TAU); ctx.stroke();
+      ctx.beginPath(); ctx.arc(x, y, cr + (1 - fl) * 40, 0, TAU); ctx.stroke();
     }
-    // A neighbour of the hovered star: a soft ring in its own colour.
+    // A neighbour of the hovered ticket: a soft ring in its own colour.
     if (near > 0.01) {
-      ctx.strokeStyle = hexA(c.core, 0.45 * near); ctx.lineWidth = 1.2;
+      ctx.strokeStyle = hexA(c.core, 0.45 * near); ctx.lineWidth = this.px(1.2);
       ctx.beginPath(); ctx.arc(x, y, cr + 6, 0, TAU); ctx.stroke();
     }
-    if (isF) {
+    // Painted bodies carry their status in their colour; only a decision's star is ringed.
+    const ringed = n.body === "star";
+    if (isF && ringed) {
       ctx.strokeStyle = hexA(c.glow, 0.28 + 0.15 * beat + 0.3 * hi); ctx.lineWidth = 1;
-      ctx.beginPath(); ctx.arc(x, y, c.r * grow + 7 + 1.5 * beat, 0, TAU); ctx.stroke();
+      ctx.beginPath(); ctx.arc(x, y, cr + 7 + 1.5 * beat, 0, TAU); ctx.stroke();
     }
-    if (isC) {
+    if (isC && ringed) {
       ctx.strokeStyle = hexA(c.core, 0.45 + 0.25 * beat); ctx.lineWidth = 1.5;
-      ctx.beginPath(); ctx.arc(x, y, c.r * grow + 5 + 1.2 * beat, 0, TAU); ctx.stroke();
+      ctx.beginPath(); ctx.arc(x, y, cr + 5 + 1.2 * beat, 0, TAU); ctx.stroke();
       ctx.strokeStyle = hexA(c.core, 0.18 + 0.14 * beat); ctx.lineWidth = 1;
-      ctx.beginPath(); ctx.arc(x, y, c.r * grow + 11 + 1.8 * beat, 0, TAU); ctx.stroke();
+      ctx.beginPath(); ctx.arc(x, y, cr + 11 + 1.8 * beat, 0, TAU); ctx.stroke();
     }
     // A live T3 thread on this ticket: a ringed moon on a tilted orbit, quicker while it runs.
     // Hovered, it stops, grows and brightens its orbit.
@@ -1560,9 +1764,9 @@ export class Engine {
       ctx.strokeStyle = running || mh ? "rgba(241,235,255,0.85)" : "rgba(183,174,216,0.6)";
       ctx.beginPath(); ctx.arc(m.x, m.y, (running ? 4.6 : 4) * (1 + 0.4 * mh), 0, TAU); ctx.stroke();
     }
-    // A fold-in's build progress: a ring that fills green as its slices are built.
-    const prog = this.progress(n);
-    if (prog) this.drawProgress(x, y, c.r * grow + 15, prog[0], prog[1]);
+    // A fold-in's build progress: a thin ring that fills green as its slices are built.
+    const prog = this.progress(n), R = this.ringAt(n);
+    if (prog) this.drawProgress(x, y, R, prog[0], prog[1]);
     // While its slices are folded away, pips say one is waiting on you (gold) or has stalled
     // (rust), so they show from the overview. A fixed size on screen.
     const kids = this.kids[n.num];
@@ -1570,7 +1774,7 @@ export class Engine {
       const shown = Math.max(0, ...kids.map((k) => k.vis));
       const pips = [kids.some((k) => k.look === "you") && GOLD, kids.some((k) => k.look === "stalled") && LCOL.stalled].filter(Boolean) as string[];
       if (pips.length && shown < 0.95) {
-        const k = 1 / this.ec.s, pr = 3.6 * k, R = c.r * grow + 15;
+        const k = 1 / this.ec.s, pr = 3.6 * k;
         ctx.globalAlpha = this.mapAlpha * this.vis(n) * (1 - shown);
         pips.forEach((pc, i) => {
           const t = -Math.PI / 4 + i * 0.5, px = x + Math.cos(t) * R, py = y + Math.sin(t) * R;
@@ -1582,14 +1786,169 @@ export class Engine {
     }
     // Selected: a thin white ring, outside the build ring when there is one.
     if (this.selected === n) {
-      const R = prog ? c.r * grow + 15 + this.px(5) : c.r * grow + 12;
+      const S = prog ? R + this.px(5) : cr + 12;
       ctx.strokeStyle = "rgba(255,255,255,0.9)"; ctx.lineWidth = this.px(1.5);
-      ctx.beginPath(); ctx.arc(x, y, R, 0, TAU); ctx.stroke();
+      ctx.beginPath(); ctx.arc(x, y, S, 0, TAU); ctx.stroke();
       ctx.strokeStyle = "rgba(255,255,255,0.25)"; ctx.lineWidth = this.px(1);
-      ctx.beginPath(); ctx.arc(x, y, R + this.px(6), 0, TAU); ctx.stroke();
+      ctx.beginPath(); ctx.arc(x, y, S + this.px(6), 0, TAU); ctx.stroke();
     }
     ctx.globalAlpha = this.mapAlpha;
   }
+
+  // A decision: a sharp star with four diffraction spikes in a soft glow. Open ones shine; a
+  // resolved one is subdued, its spikes short.
+  private drawStar(n: Node, x: number, y: number, cr: number, pulse: number) {
+    const ctx = this.ctx, c = COL[n.status], en = n.enter ?? 1, fl = n.flare, hi = n.emph;
+    const settled = n.status === "resolved" || n.status === "out_of_scope";
+    const gr = c.gr * pulse * (0.55 + 0.45 * en) * (1 + fl * 0.5) * (1 + 0.45 * hi + 0.15 * n.rel);
+    const g = ctx.createRadialGradient(x, y, 0, x, y, gr);
+    g.addColorStop(0, hexA(c.glow, Math.min(1, (0.85 * pulse + fl * 0.5 + 0.15 * hi) * en)));
+    g.addColorStop(0.35, hexA(c.glow, (0.26 * pulse + 0.14 * hi + 0.08 * n.rel) * en));
+    g.addColorStop(1, hexA(c.glow, 0));
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, gr, 0, TAU); ctx.fill();
+    const len = cr * (settled ? 1.9 : 3.4) * (1 + 0.25 * hi), w = cr * 0.3, al = settled ? 0.5 : 0.95;
+    for (let i = 0; i < 4; i++) {
+      ctx.save(); ctx.translate(x, y); ctx.rotate((i * Math.PI) / 2);
+      const sg = ctx.createLinearGradient(0, 0, len, 0);
+      sg.addColorStop(0, hexA("#ffffff", al)); sg.addColorStop(0.35, hexA(c.core, al * 0.7)); sg.addColorStop(1, hexA(c.glow, 0));
+      ctx.fillStyle = sg;
+      ctx.beginPath(); ctx.moveTo(0, -w); ctx.quadraticCurveTo(len * 0.15, -w * 0.2, len, 0);
+      ctx.quadraticCurveTo(len * 0.15, w * 0.2, 0, w); ctx.closePath(); ctx.fill();
+      ctx.restore();
+    }
+    const cg = ctx.createRadialGradient(x, y, 0, x, y, cr * 1.35);
+    cg.addColorStop(0, "#ffffff"); cg.addColorStop(0.35, hexA(c.core, 1));
+    cg.addColorStop(0.72, hexA(c.glow, settled ? 0.6 : 0.95)); cg.addColorStop(1, hexA(c.glow, 0));
+    ctx.fillStyle = cg; ctx.beginPath(); ctx.arc(x, y, cr * 1.35, 0, TAU); ctx.fill();
+  }
+
+  // A painted body, R world units in radius: which texture, its turn (within ±spin/2) and
+  // whether it's mirrored all follow from the seed, so a ticket always looks the same. False
+  // until the texture has loaded.
+  private drawTex(kind: Kind, seed: number, p: Palette, x: number, y: number, R: number, al: number, spin: number, squash = 0.12, drift = 0) {
+    const rnd = mulberry32(seed * 2654435 + kind.length * 977);
+    const img = texture(kind, Math.floor(rnd() * 9973), p, 2 * R * this.ec.s * this.dpr);
+    if (!img) return false;
+    const ctx = this.ctx, a = ctx.globalAlpha, turn = (rnd() - 0.5) * spin + drift, flip = rnd() < 0.5 ? -1 : 1;
+    ctx.save(); ctx.translate(x, y); ctx.rotate(turn); ctx.scale(flip, 1 - squash * rnd());
+    ctx.globalAlpha = a * al;
+    ctx.drawImage(img, -R, -R, R * 2, R * 2);
+    ctx.restore();
+    ctx.globalAlpha = a;
+    return true;
+  }
+
+  // A cloud sprite (a nebula or a nursery), drawn R world units in radius.
+  private drawCloud(sprite: HTMLCanvasElement, x: number, y: number, R: number, al: number) {
+    const ctx = this.ctx, a = ctx.globalAlpha;
+    ctx.globalAlpha = a * al;
+    ctx.drawImage(sprite, x - R, y - R, R * 2, R * 2);
+    ctx.globalAlpha = a;
+  }
+
+  // Seeded soft puffs in a sprite of radius 1 (scaled by k): the shared stuff of nebulae and
+  // nurseries. Kept sparse, so a cloud reads as one body rather than texture.
+  private paintPuffs(rnd: () => number, k: number, puffs: { col: string; n: number; al: number; spread: number; size: [number, number] }[]) {
+    const c = document.createElement("canvas");
+    c.width = c.height = Math.ceil(2 * k);
+    const ctx = c.getContext("2d")!;
+    ctx.translate(k, k);
+    ctx.globalCompositeOperation = "lighter";
+    for (const p of puffs) {
+      for (let i = 0; i < p.n; i++) {
+        const t = rnd() * TAU, d = Math.sqrt(rnd()) * p.spread * k, r = (p.size[0] + rnd() * (p.size[1] - p.size[0])) * k;
+        const px = Math.cos(t) * d, py = Math.sin(t) * d * 0.8;
+        const g = ctx.createRadialGradient(px, py, 0, px, py, r);
+        g.addColorStop(0, hexA(p.col, p.al)); g.addColorStop(0.5, hexA(p.col, p.al * 0.4)); g.addColorStop(1, hexA(p.col, 0));
+        ctx.fillStyle = g; ctx.beginPath(); ctx.arc(px, py, r, 0, TAU); ctx.fill();
+      }
+    }
+    return { c, ctx };
+  }
+
+  // Research: an irregular cloud with no central body, a few brighter knots for the threads of
+  // inquiry in it, in its status's colour over violet. Concluded, it contracts and fades. Painted
+  // once per ticket and status.
+  private nebulaSprite(n: Node) {
+    const key = `n${n.num}:${n.status}`, hit = this.bodySprites.get(key);
+    if (hit) return hit;
+    const settled = n.status === "resolved" || n.status === "out_of_scope", col = COL[n.status].glow;
+    const rnd = mulberry32(n.num * 7919 + 3), k = 48, s = settled ? 0.8 : 1;
+    const { c, ctx } = this.paintPuffs(rnd, k, [
+      { col: "#7a5cff", n: 3, al: settled ? 0.26 : 0.3, spread: 0.45 * s, size: [0.35 * s, 0.55 * s] },
+      { col, n: 4, al: settled ? 0.24 : 0.34, spread: 0.4 * s, size: [0.22 * s, 0.4 * s] },
+    ]);
+    const knots = settled ? 1 : 3;
+    for (let i = 0; i < knots; i++) {
+      const t = rnd() * TAU, d = rnd() * 0.3 * k * s, px = Math.cos(t) * d, py = Math.sin(t) * d * 0.8, r = 0.09 * k;
+      const g = ctx.createRadialGradient(px, py, 0, px, py, r);
+      g.addColorStop(0, `rgba(255,255,255,${settled ? 0.55 : 0.85})`); g.addColorStop(0.4, hexA(col, 0.4)); g.addColorStop(1, hexA(col, 0));
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(px, py, r, 0, TAU); ctx.fill();
+    }
+    this.bodySprites.set(key, c);
+    return c;
+  }
+
+  // A spec still forming (a fold-in not yet completed, or a map with none): a stellar nursery,
+  // warm gas gathering on a glowing centre that isn't a sun yet. Painted once per seed.
+  private nurserySprite(seed: number) {
+    const key = `f${seed}`, hit = this.bodySprites.get(key);
+    if (hit) return hit;
+    const rnd = mulberry32(seed * 104729 + 11), k = 56;
+    const { c, ctx } = this.paintPuffs(rnd, k, [
+      { col: "#8a5cff", n: 3, al: 0.14, spread: 0.5, size: [0.35, 0.55] },
+      { col: "#ff8a3d", n: 4, al: 0.18, spread: 0.35, size: [0.2, 0.4] },
+      { col: "#ffc65a", n: 3, al: 0.2, spread: 0.18, size: [0.15, 0.28] },
+    ]);
+    const g = ctx.createRadialGradient(0, 0, 0, 0, 0, 0.16 * k);
+    g.addColorStop(0, "rgba(255,248,225,0.95)"); g.addColorStop(0.35, "rgba(255,200,110,0.55)"); g.addColorStop(1, "rgba(255,150,60,0)");
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(0, 0, 0.16 * k, 0, TAU); ctx.fill();
+    this.bodySprites.set(key, c);
+    return c;
+  }
+
+  // A prototype: a small bright core in an uneven, tilted accretion disk, thicker on one side.
+  private drawProtostar(n: Node, x: number, y: number, cr: number) {
+    const ctx = this.ctx, c = COL[n.status], settled = n.status === "resolved" || n.status === "out_of_scope";
+    if (this.drawTex("protostar", n.num, palette("protostar", n.status), x, y, cr * 5, 1, 1.1, 0)) {
+      const cg = ctx.createRadialGradient(x, y, 0, x, y, cr * 0.9);
+      cg.addColorStop(0, "#ffffff"); cg.addColorStop(0.5, hexA(c.core, settled ? 0.6 : 0.95)); cg.addColorStop(1, hexA(c.glow, 0));
+      ctx.fillStyle = cg; ctx.beginPath(); ctx.arc(x, y, cr * 0.9, 0, TAU); ctx.fill();
+      return;
+    }
+    const g = ctx.createRadialGradient(x, y, 0, x, y, cr * 3.2);
+    g.addColorStop(0, hexA(c.glow, settled ? 0.35 : 0.6)); g.addColorStop(1, hexA(c.glow, 0));
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, cr * 3.2, 0, TAU); ctx.fill();
+    const tilt = -0.42 + (n.num % 5) * 0.08, rx = cr * 2.5, ry = cr * 0.75;
+    for (let i = 0; i < 3; i++) {
+      ctx.strokeStyle = hexA(i === 1 ? "#ffd9a8" : c.core, (settled ? 0.3 : 0.55) * (1 - i * 0.25));
+      ctx.lineWidth = cr * (0.5 - i * 0.12);
+      const a0 = -0.6 + i * 0.9;
+      ctx.beginPath(); ctx.ellipse(x, y, rx * (1 + i * 0.12), ry * (1 + i * 0.12), tilt, a0, a0 + TAU * (0.55 - i * 0.12)); ctx.stroke();
+    }
+    ctx.strokeStyle = hexA(c.core, settled ? 0.15 : 0.25); ctx.lineWidth = this.px(0.8);
+    ctx.beginPath(); ctx.ellipse(x, y, rx, ry, tilt, 0, TAU); ctx.stroke();
+    const cg = ctx.createRadialGradient(x, y, 0, x, y, cr);
+    cg.addColorStop(0, "#ffffff"); cg.addColorStop(0.45, hexA(c.core, 1)); cg.addColorStop(1, hexA(c.glow, 0));
+    ctx.fillStyle = cg; ctx.beginPath(); ctx.arc(x, y, cr, 0, TAU); ctx.fill();
+  }
+
+  // A folded fold-in: a stable golden sun, a defined photosphere darkening at the limb in a soft
+  // corona, brighter once every slice is built. Ruled out, it's a cold grey.
+  private drawSun(n: Node, x: number, y: number, cr: number) {
+    const ctx = this.ctx, prog = this.progress(n), done = !!prog && prog[0] === prog[1];
+    const cold = n.status === "out_of_scope";
+    const [hot, mid, rim, glow] = cold ? ["#e8e6ee", "#9a96a8", "#5a5666", "#6f6a7c"] : ["#fff8dc", "#ffcf4d", "#e08a1a", "#ffb030"];
+    const gr = cr * (done ? 3.8 : 3.3), g = ctx.createRadialGradient(x, y, cr * 0.8, x, y, gr);
+    g.addColorStop(0, hexA(glow, done ? 0.5 : 0.4)); g.addColorStop(0.4, hexA(glow, 0.14)); g.addColorStop(1, hexA(glow, 0));
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, gr, 0, TAU); ctx.fill();
+    // Painted, the corona texture is the whole sun, its own disc the photosphere.
+    if (this.drawTex("corona", n.num, palette("corona", n.status), x, y, cr * 2.6, done ? 1 : 0.9, TAU, 0)) return;
+    const sg = ctx.createRadialGradient(x - cr * 0.2, y - cr * 0.2, 0, x, y, cr);
+    sg.addColorStop(0, hot); sg.addColorStop(0.55, mid); sg.addColorStop(1, rim);
+    ctx.fillStyle = sg; ctx.beginPath(); ctx.arc(x, y, cr, 0, TAU); ctx.fill();
+  }
+
 
   // An open question's nebula: a few overlapping violet puffs and specks, painted once per fog
   // (seeded by its index, so it keeps its shape) into a sprite FOG_R world units in radius.
@@ -1625,6 +1984,7 @@ export class Engine {
         ctx.beginPath(); ctx.moveTo(f.x, f.y); ctx.lineTo(f.anchor._x, f.anchor._y); ctx.stroke();
         ctx.setLineDash([]); ctx.lineDashOffset = 0;
       }
+      if (!this.seen(f.x, f.y, FOG_R * 1.2)) continue;
       const sprite = (this.fogSprites[f.index] ??= this.paintFog(f.index));
       const breathe = 0.85 + 0.15 * Math.sin(this.clock * 0.8 + f.index);
       const grow = (1 + 0.03 * Math.sin(this.clock * 0.5 + f.index)) * (1 + 0.1 * hi);
@@ -1641,6 +2001,21 @@ export class Engine {
   }
 
   // Up to two lines of about `width` characters, ellipsed past that.
+  // A label's width at px pixels: measured once at 100px and scaled, since the font size follows
+  // the zoom and would otherwise be measured afresh every frame of it.
+  private textW(text: string, px: number, bold = false) {
+    const key = (bold ? "b" : "") + text;
+    let w = this.widths.get(key);
+    if (w == null) {
+      const ctx = this.ctx, font = ctx.font;
+      ctx.font = `${bold ? "600 " : ""}100px ui-sans-serif,system-ui,sans-serif`;
+      w = ctx.measureText(text).width / 100;
+      ctx.font = font;
+      this.widths.set(key, w);
+    }
+    return w * px;
+  }
+
   private wrap(text: string, width: number) {
     const words = text.split(/\s+/), lines: string[] = [];
     let cur = "";
@@ -1668,6 +2043,19 @@ export class Engine {
     ctx.shadowColor = `rgba(0,0,0,${(0.9 * a).toFixed(3)})`; ctx.shadowBlur = 5;
     const placed: { x: number; y: number; w: number }[] = [];
     const h = fs + 2, step = h + 2, tries = [0, step, -step, 2 * step, -2 * step];
+    if (this.core && (this.labels || this.hover?.kind === "nursery")) {
+      const p = this.w2s(this.core);
+      ctx.textAlign = "center";
+      ctx.font = `600 ${(fs - 0.5).toFixed(1)}px ui-sans-serif,system-ui,sans-serif`;
+      ctx.fillStyle = hexA("#ffd9a8", a * 0.85);
+      ctx.fillText("Spec forming", p.x, p.y + 60 * s + 10);
+      ctx.font = `${(fs - 1.5).toFixed(1)}px ui-sans-serif,system-ui,sans-serif`;
+      ctx.fillStyle = hexA("#b9a99a", a * 0.85);
+      ctx.fillText("no fold-in yet", p.x, p.y + 60 * s + 10 + fs + 2);
+      ctx.textAlign = "left";
+      const w = 90;
+      placed.push({ x: p.x - w / 2, y: p.y + 60 * s + 10, w }, { x: p.x - w / 2, y: p.y + 60 * s + 12 + fs, w });
+    }
     const start = this.att.path[0];
     const focus = (n: Node) => n.emph > 0.5 || n === this.selected || (this.labels && start?.kind === "ticket" && start.num === n.num);
     const order = [...this.nodes].sort((p, q) => Number(focus(q)) - Number(focus(p)) || q.rel - p.rel);
@@ -1678,10 +2066,10 @@ export class Engine {
       const p = this.w2s(n), num = String(n.num);
       const title = titles || f ? (n.title.length > 40 ? n.title.slice(0, 39) + "…" : n.title) : "";
       ctx.font = `600 ${fs.toFixed(1)}px ui-sans-serif,system-ui,sans-serif`;
-      const nw = ctx.measureText(num).width;
+      const nw = this.textW(num, fs, true);
       ctx.font = `${(fs - 0.5).toFixed(1)}px ui-sans-serif,system-ui,sans-serif`;
-      const tw = title ? ctx.measureText("  " + title).width : 0;
-      const w = nw + tw, off = this.progress(n) ? (COL[n.status].r + 15) * s + 8 : this.radius(n) * s + 9;
+      const tw = title ? this.textW("  " + title, fs - 0.5) : 0;
+      const w = nw + tw, off = this.progress(n) ? this.ringAt(n) * s + 8 : this.radius(n) * s + 9;
       const lx = p.x + off, cy = p.y + off * 0.55;
       let fy: number | null = f ? cy : null;
       if (fy == null) {
@@ -1736,9 +2124,16 @@ export class Engine {
       ctx.font = `600 ${(fs + 2).toFixed(1)}px ui-sans-serif,system-ui,sans-serif`;
       ctx.fillStyle = hexA("#f1ebff", a);
       ctx.fillText("Destination", lx, ty);
+      let row = 1;
+      if (this.dest.reached) {
+        ctx.font = `600 ${fs.toFixed(1)}px ui-sans-serif,system-ui,sans-serif`;
+        ctx.fillStyle = hexA("#9fd0ff", a);
+        ctx.fillText("Reached", lx, ty + lh);
+        row = 2;
+      }
       ctx.font = `${fs.toFixed(1)}px ui-sans-serif,system-ui,sans-serif`;
       ctx.fillStyle = hexA("#d4cbe8", a);
-      this.wrap(this.dest.text, 38).forEach((l, i) => ctx.fillText(l, lx, ty + (i + 1) * lh));
+      this.wrap(this.dest.text, 38).forEach((l, i) => ctx.fillText(l, lx, ty + (i + row) * lh));
     }
     if (s >= 0.32 && this.fogPts.length) {
       const ffs = clamp(12 * Math.pow(s, 0.3), 9, 13.5);
@@ -1801,8 +2196,16 @@ export class Engine {
   }
 
   private render = () => {
-    const W = innerWidth, H = innerHeight, ctx = this.ctx;
-    const now = (performance.now() - this.t0) / 1000;
+    const W = innerWidth, H = innerHeight, ctx = this.ctx, t = performance.now();
+    const settling = this.fade.on || Math.abs(this.goal.s - this.cam.s) > 1e-3 * this.goal.s
+      || Math.abs(this.goal.x - this.cam.x) > 0.3 || Math.abs(this.goal.y - this.cam.y) > 0.3;
+    if (!settling && t - this.lastInput > 1500 && t - this.lastDraw < 32) {
+      this.raf = requestAnimationFrame(this.render);
+      return;
+    }
+    this.lastDraw = t;
+    textureBudget(2);
+    const now = (t - this.t0) / 1000;
     let dt = now - this.lastClock;
     if (dt < 0 || dt > 0.1) dt = 0.016;
     this.lastClock = now; this.clock = now;
@@ -1837,6 +2240,7 @@ export class Engine {
     }
     const zt = 0.95 + 0.05 * this.mapAlpha, Cx = W / 2, Cy = H / 2;
     this.ec = { s: this.cam.s * zt, x: Cx + (this.cam.x - Cx) * zt, y: Cy + (this.cam.y - Cy) * zt };
+    this.view = { x0: -this.ec.x / this.ec.s, y0: -this.ec.y / this.ec.s, x1: (W - this.ec.x) / this.ec.s, y1: (H - this.ec.y) / this.ec.s };
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     ctx.clearRect(0, 0, W, H);
     this.drawStars(W, H);
@@ -1845,6 +2249,7 @@ export class Engine {
     ctx.translate(this.ec.x, this.ec.y); ctx.scale(this.ec.s, this.ec.s);
     this.drawClusters();
     this.drawFog();
+    this.drawCore();
     this.drawDest();
     // Whatever the hover touches draws last, over its neighbours.
     const up = (i: number) => this.edgeFx[i].emph > 0.01;

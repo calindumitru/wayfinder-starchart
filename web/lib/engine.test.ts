@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { findClusters, gather, layout, mulberry32, ringR } from "./engine";
+import type { Attention } from "./attention";
+import { criticalChain, findClusters, gather, layout, mulberry32, rests, ringR } from "./engine";
+import type { Ticket, WayMap } from "./types";
 
 const nodes = () => [
   { num: 2, rank: 0, x: 0, y: 0 },
@@ -26,7 +28,7 @@ describe("layout", () => {
     const r = (num: number) => { const p = n.find((x) => x.num === num)!; return Math.hypot(p.x, p.y); };
     expect(r(2)).toBeLessThan(r(3));
     expect(r(3)).toBeLessThan(r(4));
-    expect(Math.abs(r(4) - ringR(2))).toBeLessThan(165);
+    expect(Math.abs(r(4) - ringR(2))).toBeLessThan(125);
   });
 });
 
@@ -67,5 +69,47 @@ describe("mulberry32", () => {
     const xs = Array.from({ length: 5 }, a);
     expect(xs).toEqual(Array.from({ length: 5 }, b));
     xs.forEach((x) => expect(x >= 0 && x < 1).toBe(true));
+  });
+});
+
+const t = (num: number, status: Ticket["status"], more: Partial<Ticket> = {}): Ticket => ({
+  num, title: "", type: "grilling", status, url: "", body: "", answer: null, gist: null, assignee: null,
+  staleClaim: false, blockers: [], outsideBlockers: [], rank: 0, slices: null, ...more,
+});
+
+describe("criticalChain", () => {
+  const att = (path: Attention["path"] = []): Attention => ({ looks: {}, unlocks: {}, path, open: { decisions: 0, slices: 0 }, now: 0 });
+  const m = (tickets: Ticket[], es: [number, number][]) =>
+    ({ tickets, edges: es.map(([from, to]) => ({ from, to, satisfied: false })) }) as unknown as WayMap;
+
+  it("follows the longest run of open dependencies, not the history behind them", () => {
+    // 1 (resolved) → 2 → 3 → 4 is the long run among open ones; 2 → 5 is a short branch.
+    const map = m([t(1, "resolved"), t(2, "frontier"), t(3, "blocked"), t(4, "blocked"), t(5, "blocked")], [[1, 2], [2, 3], [3, 4], [2, 5]]);
+    expect([...criticalChain(map, att())].sort()).toEqual([1, 2]);
+  });
+
+  it("adds the links the suggested path follows", () => {
+    const map = m([t(2, "frontier"), t(3, "blocked"), t(4, "frontier"), t(5, "blocked")], [[2, 3], [4, 5]]);
+    const chain = criticalChain(map, att([{ kind: "ticket", num: 4 }, { kind: "ticket", num: 5 }, { kind: "dest", num: 1 }]));
+    expect(chain.has(1)).toBe(true);
+  });
+});
+
+describe("rests", () => {
+  const m = (tickets: Ticket[]) => ({ tickets, edges: [] }) as unknown as WayMap;
+
+  it("puts the completed fold-in at the centre and steps the rings out for it", () => {
+    const fold = (num: number, status: Ticket["status"]) => t(num, status, { type: "task", title: "Fold the spec" });
+    const r = rests(m([fold(7, "frontier"), fold(8, "resolved"), t(2, "frontier", { rank: 1 })]));
+    expect(r.centre).toBe(8);
+    expect(r.ring({ num: 8, rank: 0 })).toBe(0);
+    expect(r.ring({ num: 2, rank: 1 })).toBeGreaterThan(ringR(1));
+  });
+
+  it("sends concluded research out past the rings, and keeps open research in", () => {
+    const r = rests(m([t(2, "frontier", { rank: 2 }), t(3, "resolved", { type: "research" }), t(4, "frontier", { type: "research" })]));
+    expect(r.centre).toBeNull();
+    expect(r.ring({ num: 3, rank: 0 })).toBeGreaterThan(ringR(2));
+    expect(r.ring({ num: 4, rank: 0 })).toBe(ringR(0));
   });
 });

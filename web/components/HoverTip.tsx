@@ -168,6 +168,14 @@ export function HoverTip({ map, hover, live, canOpenThreads, att, ref }: Props) 
         </div>
       </>
     );
+  } else if (h?.kind === "nursery") {
+    body = (
+      <>
+        <div className="tkind nursery">Spec forming</div>
+        <div className="ttitle">No fold-in yet</div>
+        <p>This map has no fold-in ticket, so its decisions haven&apos;t been folded into the spec. Once one is written and completed, a sun forms here and build slices can orbit it.</p>
+      </>
+    );
   } else if (h?.kind === "cluster") {
     const hub = map.tickets.find((x) => x.num === h.hub);
     const members = map.tickets.filter((x) => h.members.includes(x.num));

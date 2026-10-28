@@ -29,12 +29,26 @@ the map straight from GitHub and can act on it.
   never commented left an abandoned claim, so the ticket counts as free. A free ticket is on the
   *frontier* when every blocker is closed, blockers off the map included, and *blocked*
   otherwise.
+- **Draws each ticket as a body.** Its form says its role and its colour its status. A decision
+  is a star with four spikes, bright while open and subdued once resolved; research is a small
+  nebula in its status's colour, and once concluded it drifts out past the rings into a belt of
+  its own, each one turning slowly in a colour of its own; a prototype is a protostar, a bright core in an accretion disk
+  with jets. While the spec is still forming there's a stellar nursery, dusty gas with bright
+  knots: a fold-in not yet completed is one, and a map with no fold-in at all has one at its
+  centre ("Spec forming"). The map's fold-in holds the centre, its rings stepping out round it.
+  A completed fold-in is a golden sun in a corona, clearly larger than
+  the planets that orbit it and lighting them from its side, with a thin ring that fills as
+  they're built. Nebulae, protostars, nurseries, coronas and planets are painted textures in
+  `web/public/bodies` (the clouds greyscale, coloured by status in the browser; the planets
+  discs, a world per look: green for ready, ochre for you, magma while blocked, cooled rust
+  once stalled, grey once built, and blue ice while being built); each ticket keeps the same
+  one, turned and mirrored its own way. The key lists the forms on the map.
 - **Shows the build.** A ticket's sub-issues are its build slices (a fold-in's, usually), drawn
   as small planets orbiting it; a ticket on the map with a build label (`ready-for-agent`,
   `ready-for-human`, `size:*`) is a slice with no parent, and these orbit a "Build" hub beside
   the decisions. A slice is green when it's ready, blue while it's being built (claimed, or a PR
-  names it as its own, the rule `scripts/frontier.sh` uses), hollow red while blocked, gold with
-  a halo when it's **waiting on you** (`ready-for-human`, or an owner check on it is open) and
+  names it as its own, the rule `scripts/frontier.sh` uses), red while blocked, gold when
+  it's **waiting on you** (`ready-for-human`, or an owner check on it is open) and
   dull rust once it's **stalled** (being built, but neither it nor its open PR has changed in
   three days). Its size is what it frees: the open slices waiting on it, directly or further
   down. Finished slices (built, nothing open on them) fold into a ring of dust round their
@@ -42,19 +56,26 @@ the map straight from GitHub and can act on it.
   ages (glowing only in its first twelve hours); hover the ring to list them. Checks are the
   `check:` issues written from a slice ("From slice #613" or a **Slice:** link, with their
   **Due:** line). An open owner check makes its slice gold, and the label names it ("Waiting on
-  you: check #826"); each open agent check is a small blue moon on it. All of them gather in a
+  you: check #826"). Each open check is a satellite of its slice, gold for an owner check and
+  blue for an agent's, and stays with it after its PR merges. All of them gather in a
   tray in the bottom bar. A fold-in's ring fills as its slices are built, and from the
   overview a gold or rust pip on it says one of its slices is waiting on you or has stalled.
   When a map opens, the slices of up to six fold-ins with open slices are read, one after
   another, so these show without opening each. **Build this slice** starts `/slice-flow
   <slice>`; a merged PR that already names the slice turns it into a warning and **Build
   anyway**.
+- **Keeps the dependencies quiet.** Dependency lines are faint traces by default. The critical
+  chain stands out: the longest run of dependencies between open tickets, plus the links the
+  suggested path follows. Select a ticket and its own chain stands out instead, everything it
+  waits on and everything waiting on it; hover one and its direct links light up. Slice
+  dependencies stay faint until a slice in them is hovered or selected.
 - **Points the way.** A dashed gold path, a suggestion rather than a dependency, runs from the
   item worth doing first (waiting on you, then whatever frees the most) along what it frees:
   slice to slice, out to its fold-in (ringed in gold as the path passes through) and on through
   the decisions it unblocks. Its last leg, dotted and fainter, reaches the map's destination: a
   bright violet star past the rim, with long cross spikes and faint rings like a navigation
-  mark, labelled with the map's goal. Hovering it counts what's still open on
+  mark, labelled with the map's goal. While the goal is open it breathes slowly; once the map is
+  closed it holds steady and says **Reached**. Hovering it counts what's still open on
   the map, decisions and build slices separately. Hovering a ticket explains its ring ("6 of 6
   build slices built").
 - **Hides the labels on request.** View › Show labels, or the L key, turns the map's labels

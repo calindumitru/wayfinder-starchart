@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { attention, collapsed, look, recent } from "./attention";
+import { attention, bodyOf, collapsed, look, nursery, recent } from "./attention";
 import type { BuildSlice, Ticket, WayMap } from "./types";
 
 const NOW = Date.parse("2026-10-25T12:00:00Z");
@@ -19,6 +19,28 @@ const map = (tickets: Ticket[], slices: BuildSlice[], edges: WayMap["edges"] = [
   counts: { total: 0, resolved: 0, outOfScope: 0, claimed: 0, frontier: 0, blocked: 0 },
 });
 const owner = { num: 99, title: "", url: "", kind: "owner", open: true, due: null, slice: 1, parent: 10 };
+
+describe("bodyOf", () => {
+  it("draws each kind of ticket as its own body", () => {
+    expect(bodyOf(ticket(1, "frontier", { type: "grilling" }))).toBe("star");
+    expect(bodyOf(ticket(1, "frontier", { type: "task", title: "Ask Meetup" }))).toBe("star");
+    expect(bodyOf(ticket(1, "frontier", { type: "research" }))).toBe("nebula");
+    expect(bodyOf(ticket(1, "resolved", { type: "prototype" }))).toBe("protostar");
+  });
+
+  it("shows a fold-in as a nursery until it's completed, then a sun", () => {
+    expect(bodyOf(ticket(1, "claimed", { type: "task", title: "Fold the sharing decisions into SPEC" }))).toBe("nursery");
+    expect(bodyOf(ticket(1, "claimed", { type: "task", title: "Write the slices", slices: { total: 3, closed: 0 } }))).toBe("nursery");
+    expect(bodyOf(ticket(1, "resolved", { type: "task", title: "Fold the view decisions into SPEC" }))).toBe("sun");
+  });
+
+  it("gives a map with no fold-in a nursery of its own", () => {
+    const fold = (status: Ticket["status"]) => ticket(2, status, { type: "task", title: "Fold it into SPEC" });
+    expect(nursery(map([ticket(1, "frontier")], []))).toBe(true);
+    expect(nursery(map([ticket(1, "frontier"), fold("out_of_scope")], []))).toBe(true);
+    expect(nursery(map([ticket(1, "frontier"), fold("claimed")], []))).toBe(false);
+  });
+});
 
 describe("look", () => {
   it("is waiting on you for a human slice or an open owner check", () => {
