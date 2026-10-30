@@ -1,15 +1,20 @@
-// The painted bodies: textures in public/bodies. Most are greyscale, light on black, coloured on
-// first use by a palette (brightness picks the colour and sets the alpha, so the black falls
-// away). Planets are discs with their own transparency: the coloured sets are drawn as they are,
-// the greyscale one tinted, keeping its disc. Each keeps three sizes, so a small body is drawn
-// from a small image and doesn't shimmer. Until an image has loaded, `texture` returns null and
-// the engine draws its own stand-in.
+// The painted bodies: textures in public/bodies, cut by scripts/import-pack.py. Most keep their
+// own paint and transparency, drawn as they are: the research nebulae, the protostars, the green
+// and white decision stars, the sun, the coronas, the stars, the rocks and the coloured planets.
+// The rest are greyscale, light on black, coloured on first use by a palette (brightness picks
+// the colour and sets the alpha, so the black falls away): the nurseries, "fog" (the nebulae
+// again, for the clouds coloured by palette), "protostar-mono" (the protostars again, for the
+// settled ones), "decision-mono" (the white decision stars again, for the other statuses), and
+// the planets' mono set, tinted keeping its disc. Each keeps three sizes, so a small body is
+// drawn from a small image and doesn't shimmer. Until an image has loaded, `texture` returns
+// null and the engine draws its own stand-in.
 
-export type Kind = "nebula" | "protostar" | "nursery" | "corona" | "planet-green" | "planet-yellow" | "planet-red" | "planet-gray" | "planet-mono";
-const SET: Record<Kind, { n: number; ext: string }> = {
-  nebula: { n: 9, ext: "png" }, protostar: { n: 5, ext: "png" }, nursery: { n: 3, ext: "png" }, corona: { n: 1, ext: "png" },
-  "planet-green": { n: 3, ext: "webp" }, "planet-yellow": { n: 3, ext: "webp" }, "planet-red": { n: 3, ext: "webp" },
-  "planet-gray": { n: 3, ext: "webp" }, "planet-mono": { n: 12, ext: "webp" },
+export type Kind = "nebula" | "fog" | "protostar" | "nursery" | "corona" | "sun" | "star" | "rock" | "protostar-mono" | "decision-green" | "decision-white" | "decision-mono" | "planet-green" | "planet-yellow" | "planet-red" | "planet-gray" | "planet-blue" | "planet-mono";
+// How many of each. The coronas and stars come in six colours: orange, blue, magenta, ringed
+// orange, red and violet; the protostars in orange, blue, magenta, red, green and violet.
+const SET: Record<Kind, number> = {
+  nebula: 8, fog: 8, protostar: 6, "protostar-mono": 6, "decision-green": 3, "decision-white": 3, "decision-mono": 3, nursery: 3, corona: 6, sun: 1, star: 6, rock: 8,
+  "planet-green": 3, "planet-yellow": 3, "planet-red": 3, "planet-gray": 3, "planet-blue": 3, "planet-mono": 3,
 };
 // The smaller sizes kept, as fractions of the image's own.
 const STEPS = [1, 0.375, 0.125];
@@ -34,10 +39,10 @@ function load() {
   if (started || typeof window === "undefined") return;
   started = true;
   for (const kind of Object.keys(SET) as Kind[]) {
-    for (let i = 1; i <= SET[kind].n; i++) {
+    for (let i = 1; i <= SET[kind]; i++) {
       const name = `${kind}-${String(i).padStart(2, "0")}`, img = new Image();
       img.onload = () => images.set(name, img);
-      img.src = `/bodies/${name}.${SET[kind].ext}`;
+      img.src = `/bodies/${name}.webp`;
     }
   }
 }
@@ -86,11 +91,11 @@ function colour(img: HTMLImageElement, p: Palette | null) {
   return mips;
 }
 
-// Texture `seed` of a kind in a palette, at the size nearest above `px` (its diameter on
-// screen, in device pixels); null until its image has loaded.
+// Texture `seed` of a kind (its index, wrapped) in a palette, at the size nearest above `px`
+// (its diameter on screen, in device pixels); null until its image has loaded.
 export function texture(kind: Kind, seed: number, p: Palette | null, px: number) {
   load();
-  const name = `${kind}-${String((Math.abs(seed) % SET[kind].n) + 1).padStart(2, "0")}`;
+  const name = `${kind}-${String((Math.abs(seed) % SET[kind]) + 1).padStart(2, "0")}`;
   const key = p ? `${name}:${p.stops.join()}:${p.gain}` : name;
   let mips = tinted.get(key);
   if (!mips) {

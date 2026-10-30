@@ -1,6 +1,6 @@
 /* The star-map's look started from rengwu/wayfinder-maps' (MIT); the chrome around it is new. */
 :root{
-  --bg:#04060c;--glass:rgba(10,14,24,.78);--glass-hi:rgba(16,21,34,.86);--line:rgba(120,140,190,.16);--line-hi:rgba(140,165,220,.32);
+  --bg:#070b1a;--glass:rgba(10,14,24,.78);--glass-hi:rgba(16,21,34,.86);--line:rgba(120,140,190,.16);--line-hi:rgba(140,165,220,.32);
   --text:#e8ecf4;--soft:#aab3c5;--mute:#7c859a;--blue:#2f6df6;--blue-hi:#3f7cff;
   --frontier:#22c58b;--claimed:#3b8cff;--blocked:#ff4d4d;--resolved:#8796b0;--gold:#ffc53d;--rust:#c8643c;--oos:#6f6a7c;--fog:#9a6bf0;--thread:#d9ccff;
 }
@@ -8,13 +8,7 @@
 html,body{margin:0;height:100%;overflow:hidden;background:var(--bg);
   font:14px/1.5 ui-sans-serif,-apple-system,"SF Pro Text","Inter",Segoe UI,Roboto,sans-serif;color:var(--text);-webkit-font-smoothing:antialiased}
 button,textarea,select,input{font:inherit}
-/* Deep-sky haze behind the canvas: broad violet and blue clouds. Static, so it costs nothing per frame. */
-body{background:
-  radial-gradient(40% 45% at 10% 82%,rgba(60,70,160,.2),transparent 70%),
-  radial-gradient(34% 40% at 88% 16%,rgba(110,60,170,.16),transparent 70%),
-  radial-gradient(30% 34% at 76% 90%,rgba(90,50,160,.13),transparent 70%),
-  radial-gradient(28% 30% at 30% 8%,rgba(50,80,170,.1),transparent 70%),
-  var(--bg)}
+/* The deep-sky haze is painted by the engine (drawSky), so it moves a little with the map. */
 #sky{position:fixed;inset:0;display:block;cursor:grab;touch-action:none}
 #sky.pointer{cursor:pointer}
 #sky.drag{cursor:grabbing}

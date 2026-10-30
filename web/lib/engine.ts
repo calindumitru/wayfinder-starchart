@@ -46,8 +46,15 @@ export const LCOL: Record<Look, string> = {
   dropped: "#6f6a7c",
 };
 export const GOLD = "#ffc53d";
-const SLICE_R = 5.2;
+const SLICE_R = 7;
 const DEST_R = 110;
+// Where the planet paintings are lit from: the upper left.
+const PAINT_LIGHT = (-3 * Math.PI) / 4;
+// The painted flame rings (their ring at 0.42 of the half-width) and sparkle stars, by colour:
+// the hub's is the blue one, the destination's the violet.
+const CORONA = { blue: 1, violet: 5 }, CORONA_RING = 0.42, STAR = { violet: 5 }, SUN_DISC = 0.67, STAR_TIP = 0.95;
+// The painted protostar for each open status (their order in public/bodies).
+const PROTOSTAR: Record<"frontier" | "claimed" | "blocked", number> = { frontier: 4, claimed: 1, blocked: 3 };
 // How long a finished slice's sparkle keeps its glow.
 const AFTERGLOW_HOURS = 12;
 const SLICES_FROM_ZOOM = 0.85;
@@ -107,39 +114,25 @@ function mix(a: string, b: string, t: number) {
   return "#" + [0, 2, 4].map((i) => Math.round(p(a, i) + (p(b, i) - p(a, i)) * t).toString(16).padStart(2, "0")).join("");
 }
 
-// A slice's world by its look: green for ready, ochre for you, magma while blocked, grey once
-// built; being built, an ice world in blue, and gone quiet, a cooled rust one (the greyscale
-// set, tinted).
-const WORLD: Partial<Record<Look, Kind>> = { ready: "planet-green", you: "planet-yellow", blocked: "planet-red", stalled: "planet-mono", built: "planet-gray", building: "planet-mono" };
+// A slice's world by its look: green for ready, desert gold for you, magma while blocked, a
+// grey moon once built, an ocean world in blue while being built, and gone quiet, a cooled
+// rust moon (the grey moons in greyscale, tinted).
+const WORLD: Partial<Record<Look, Kind>> = { ready: "planet-green", you: "planet-yellow", blocked: "planet-red", stalled: "planet-mono", built: "planet-gray", building: "planet-blue" };
 const TINT: Partial<Record<Look, Palette>> = {
-  building: { stops: ["#06142e", "#1d4f9a", "#6aa8ff", "#eef6ff"], gain: 1, disc: true },
   stalled: { stops: ["#1c0b06", "#5c2617", "#b45a35", "#e9a27c"], gain: 1, disc: true },
 };
 
-// Concluded research's colours, one per ticket, like the varied gas of real nebulae: teal, rose,
-// indigo, amber, ice and violet.
-const SPENT: [string, string, string, string][] = [
-  ["#0d3b4a", "#1fa3a8", "#8ff0e0", "#f0fffb"],
-  ["#3d0f3a", "#c2408f", "#ffb0d8", "#fff0f8"],
-  ["#1a1650", "#5a5ad8", "#b8b8ff", "#f4f4ff"],
-  ["#4a2208", "#d8782a", "#ffd09a", "#fff6ea"],
-  ["#0b2a50", "#2f86d8", "#a8d8ff", "#f2faff"],
-  ["#2a0f4a", "#9a4ad8", "#e0b0ff", "#fbf2ff"],
-];
+// An open question's cloud: violet, lit with lilac.
+const FOG_PALETTE: Palette = { stops: ["#2a1660", "#7a4ae0", "#c9a8ff", "#f4ecff"], gain: 1 };
 
-// How each painted body is coloured: research over violet, in its status's colour; prototypes
-// in theirs; nurseries a warm forming glow; a sun's corona gold, or grey once ruled out.
-function palette(kind: Kind, status: Status, seed = 0): Palette {
+// How each body coloured by palette is coloured: research ruled out a dull grey (otherwise it
+// keeps its painting's colours); settled prototypes, and decisions claimed, blocked or ruled
+// out, in their status's colour; nurseries a warm forming glow.
+function palette(kind: Kind, status: Status): Palette {
   const c = COL[status], settled = status === "resolved" || status === "out_of_scope";
-  if (kind === "nebula") {
-    if (status === "out_of_scope") return { stops: [mix(c.glow, "#000000", 0.7), mix(c.glow, "#000000", 0.3), c.glow, c.core], gain: 0.55 };
-    return settled ? { stops: SPENT[seed % SPENT.length], gain: 0.9 } : { stops: ["#3a2a8f", mix("#6a4cff", c.glow, 0.6), c.core, "#ffffff"], gain: 1.3 };
-  }
-  if (kind === "protostar") return { stops: [mix(c.glow, "#000000", 0.5), c.glow, c.core, "#ffffff"], gain: settled ? 0.8 : 1.1 };
-  if (kind === "nursery") return { stops: ["#4a2380", "#e0662a", "#ffc65a", "#fff3dc"], gain: 1.2 };
-  return status === "out_of_scope"
-    ? { stops: ["#3a3844", "#7a7688", "#c8c6d2", "#f0eef6"], gain: 0.9 }
-    : { stops: ["#7a3208", "#f08a1e", "#ffd257", "#fffbe8"], gain: 1.2 };
+  if (kind === "nebula") return { stops: [mix(c.glow, "#000000", 0.7), mix(c.glow, "#000000", 0.3), c.glow, c.core], gain: 0.55 };
+  if (kind === "protostar" || kind === "decision-mono") return { stops: [mix(c.glow, "#000000", 0.5), c.glow, c.core, "#ffffff"], gain: settled ? 0.8 : 1.1 };
+  return { stops: ["#2c1a6e", "#8a40c8", "#e08a50", "#ffd8a8"], gain: 0.9 };
 }
 
 // A label's status line, in a lighter tint of its look.
@@ -375,6 +368,7 @@ export class Engine {
   private mini: { canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D; box: { x: number; y: number; s: number } } | null = null;
   private fogSprites: HTMLCanvasElement[] = [];
   private destSprite: HTMLCanvasElement | null = null;
+  private destLight: HTMLCanvasElement | null = null;
   private bodySprites = new Map<string, HTMLCanvasElement>();
   private widths = new Map<string, number>();
   private threads = new Map<number, string>();
@@ -385,6 +379,7 @@ export class Engine {
   private mapAlpha = 1;
   private fade = { on: false, t: 0, dur: 1.4, from: 0, to: 1 };
   private stars: { f: number; sz: number; a: number; stars: { x: number; y: number; t: number }[] }[] = [];
+  private sky: HTMLCanvasElement | null = null;
   private raf = 0;
   // When the pointer, wheel or keys last did something, and when a frame was last drawn: idle,
   // the map redraws at about 30 fps, enough for its slow drift and twinkle.
@@ -569,7 +564,7 @@ export class Engine {
     }
     const place = (group: SNode[], a: number) => {
       const live = group.filter((sn) => !sn.dust), dust = group.filter((sn) => sn.dust);
-      const R = Math.min(110, Math.max(58, 40 + 7 * live.length));
+      const R = Math.min(120, Math.max(68, 44 + 8 * live.length));
       live.forEach((sn, i) => {
         const t = -Math.PI / 2 + (i * TAU) / live.length;
         sn.ox = Math.cos(t) * R; sn.oy = Math.sin(t) * R * 0.85;
@@ -1215,11 +1210,29 @@ export class Engine {
     for (const g of this.dustGroups()) {
       const n = g.a.num >= 0 ? this.byNum[g.a.num] : null, hi = hov === g.a.num ? 1 : 0;
       ctx.globalAlpha = this.mapAlpha * (0.55 + 0.45 * Math.max(g.vis, hi)) * (n ? 1 - 0.6 * n.dim : 1);
+      // Rocks, not specks: an asteroid belt in warm greys and browns, each lit on its sunward
+      // side, with a haze of finer grit between them.
       const R = this.dustR(g.a.r), rnd = mulberry32(g.a.num * 7 + 3), specks = Math.min(160, g.count * 5);
-      ctx.fillStyle = hi ? "rgba(225,232,248,0.95)" : "rgba(200,212,235,0.7)";
+      const hz = ctx.createRadialGradient(g.a._x, g.a._y, R - 12, g.a._x, g.a._y, R + 12);
+      hz.addColorStop(0, "rgba(150,125,100,0)"); hz.addColorStop(0.5, `rgba(150,125,100,${hi ? 0.14 : 0.07})`); hz.addColorStop(1, "rgba(150,125,100,0)");
+      ctx.fillStyle = hz; ctx.beginPath(); ctx.arc(g.a._x, g.a._y, R + 12, 0, TAU); ctx.arc(g.a._x, g.a._y, R - 12, 0, TAU, true); ctx.fill();
+      // Every fourth speck is a painted stone, each turned its own way and turning very slowly
+      // with the belt; the rest are grit, kept small on screen however far in the zoom goes.
+      const ROCK = ["#8c7360", "#5e4a3c", "#a68c72", "#4a3a30", "#7a6656", "#6b5a4e"], cap = this.px(2.2), tk = this.clock * 0.02;
       for (let i = 0; i < specks; i++) {
-        const t = rnd() * TAU, r = R + (rnd() - 0.5) * 9, sz = this.px(0.5 + rnd() * (i % 5 ? 0.6 : 1.1));
-        ctx.beginPath(); ctx.arc(g.a._x + Math.cos(t) * r, g.a._y + Math.sin(t) * r, sz, 0, TAU); ctx.fill();
+        const t = rnd() * TAU, r = R + (rnd() - 0.5) * 14, big = i % 4 === 0;
+        const px = g.a._x + Math.cos(t) * r, py = g.a._y + Math.sin(t) * r;
+        if (big) {
+          const sz = 2.2 + rnd() * 2.4, stone = texture("rock", i, null, 2 * sz * this.ec.s * this.dpr);
+          if (stone) {
+            ctx.save(); ctx.translate(px, py); ctx.rotate(t + tk * (rnd() < 0.5 ? 1 : -1));
+            ctx.drawImage(stone, -sz, -sz, 2 * sz, 2 * sz); ctx.restore();
+            continue;
+          }
+        }
+        const sz = Math.min(cap, big ? 1.1 + rnd() * 1.1 : 0.4 + rnd() * 0.7), col = ROCK[i % ROCK.length];
+        ctx.fillStyle = hi ? mix(col, "#ffffff", 0.3) : col;
+        ctx.beginPath(); ctx.ellipse(px, py, sz, sz * (0.7 + rnd() * 0.3), t, 0, TAU); ctx.fill();
       }
       if (hi) {
         ctx.strokeStyle = "rgba(200,212,235,0.35)"; ctx.lineWidth = 1 / this.ec.s; ctx.setLineDash([2 / this.ec.s, 4 / this.ec.s]);
@@ -1257,17 +1270,31 @@ export class Engine {
     ctx.fill();
   }
 
-  // The hub the map's own slices hang on: a small pale core with its build ring.
+  // The hub the map's own slices hang on: a small white dwarf, a bright point in a cool
+  // blue-white glow with short spikes, and its build ring round it.
   private drawHub() {
     const h = this.hub;
     if (!h) return;
     const ctx = this.ctx, loose = this.slices.filter((sn) => sn.parent == null && sn.state !== "dropped");
-    const built = loose.filter((sn) => sn.state === "built").length;
-    const g = ctx.createRadialGradient(h._x, h._y, 0, h._x, h._y, 22);
-    g.addColorStop(0, "rgba(190,205,240,0.45)"); g.addColorStop(1, "rgba(150,170,230,0)");
-    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(h._x, h._y, 22, 0, TAU); ctx.fill();
-    ctx.fillStyle = "#e3e9f6"; ctx.beginPath(); ctx.arc(h._x, h._y, 3.2, 0, TAU); ctx.fill();
-    this.drawProgress(h._x, h._y, h.r + 12, built, loose.length);
+    const built = loose.filter((sn) => sn.state === "built").length, x = h._x, y = h._y;
+    const g = ctx.createRadialGradient(x, y, 0, x, y, 30);
+    g.addColorStop(0, "rgba(200,215,255,0.55)"); g.addColorStop(0.25, "rgba(170,195,255,0.18)"); g.addColorStop(1, "rgba(150,170,230,0)");
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, 30, 0, TAU); ctx.fill();
+    // Its flame ring: the blue corona, screened, turning very slowly, inside the build ring;
+    // short drawn spikes until it loads.
+    ctx.globalCompositeOperation = "screen";
+    if (!this.drawTex("corona", 0, null, x, y, 11 / CORONA_RING, 0.85, 0, 0, this.clock * 0.02, CORONA.blue)) {
+      ctx.fillStyle = "rgba(225,235,255,0.5)";
+      for (let i = 0; i < 4; i++) {
+        ctx.save(); ctx.translate(x, y); ctx.rotate((i * Math.PI) / 2);
+        ctx.beginPath(); ctx.moveTo(0, -1); ctx.lineTo(9, 0); ctx.lineTo(0, 1); ctx.closePath(); ctx.fill(); ctx.restore();
+      }
+    }
+    ctx.globalCompositeOperation = "source-over";
+    const cg = ctx.createRadialGradient(x, y, 0, x, y, 4.5);
+    cg.addColorStop(0, "#ffffff"); cg.addColorStop(0.5, "#e3ecff"); cg.addColorStop(1, "rgba(200,215,255,0)");
+    ctx.fillStyle = cg; ctx.beginPath(); ctx.arc(x, y, 4.5, 0, TAU); ctx.fill();
+    this.drawProgress(x, y, h.r + 12, built, loose.length);
   }
 
   // A build ring: a faint circle that fills green as slices are built.
@@ -1316,10 +1343,12 @@ export class Engine {
     const searched = this.match != null && !this.match.has(sn.num) ? 0.2 : 1;
     ctx.globalAlpha = this.mapAlpha * sn.vis * searched * (1 - 0.7 * sn.dim);
     const r = this.sliceR(sn) * (1 + 0.2 * sn.emph) * (0.6 + 0.4 * sn.vis);
-    if (sn.look !== "stalled" && sn.look !== "dropped") {
-      const gr = r * 3;
-      const g = ctx.createRadialGradient(x, y, 0, x, y, gr);
-      g.addColorStop(0, hexA(col, (sn.look === "blocked" ? 0.18 : 0.38) + 0.2 * sn.emph)); g.addColorStop(1, hexA(col, 0));
+    // Its atmosphere: a halo in its colour, close and bright, fading out wide. Stalled, only a
+    // faint one.
+    if (sn.look !== "dropped") {
+      const gr = r * 3.2, dull = sn.look === "stalled" ? 0.35 : 1;
+      const g = ctx.createRadialGradient(x, y, r * 0.8, x, y, gr);
+      g.addColorStop(0, hexA(col, (0.5 + 0.2 * sn.emph) * dull)); g.addColorStop(0.3, hexA(col, 0.16 * dull)); g.addColorStop(1, hexA(col, 0));
       ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, gr, 0, TAU); ctx.fill();
     }
     if (sn.look === "dropped") {
@@ -1333,23 +1362,35 @@ export class Engine {
       const lx = d ? (an!._x - x) / d : -0.6, ly = d ? (an!._y - y) / d : -0.8;
       const lit = sn.look === "stalled" ? "#e9a27c" : col, kind = WORLD[sn.look];
       const img = kind && texture(kind, sn.num * 7 + 3, TINT[sn.look] ?? null, 2 * r * this.ec.s * this.dpr);
-      const sg = ctx.createRadialGradient(x + lx * r * 0.5, y + ly * r * 0.5, r * 0.05, x + lx * r * 0.25, y + ly * r * 0.25, r * 1.2);
+      // The painted world, turned so its lit side faces its sun (every painting is lit from the
+      // upper left; its disc fills the sprite to 209/256, so it's drawn a little larger than
+      // r); a plain shaded sphere until it loads. Then its night
+      // side away from the sun, a lit rim toward it and a small specular spot.
       if (img) {
-        ctx.save(); ctx.translate(x, y); ctx.rotate(((sn.num * 0.618) % 1) - 0.5);
-        ctx.drawImage(img, -r, -r, 2 * r, 2 * r); ctx.restore();
-        const sx = x + lx * r * 0.55, sy = y + ly * r * 0.55, sh = ctx.createRadialGradient(sx, sy, 0, sx, sy, r * 1.75);
-        sh.addColorStop(0, "rgba(255,255,255,0.1)"); sh.addColorStop(0.4, "rgba(0,0,0,0)");
-        sh.addColorStop(0.75, "rgba(2,4,12,0.72)"); sh.addColorStop(1, "rgba(2,4,12,0.92)");
-        ctx.fillStyle = sh; ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.fill();
-      } else if (sn.look === "stalled") {
-        sg.addColorStop(0, "#f6c9ae"); sg.addColorStop(0.3, "#b45a35"); sg.addColorStop(0.7, "#4a1d10"); sg.addColorStop(1, "#1c0b06");
+        const k = r / 0.816;
+        ctx.save(); ctx.translate(x, y); ctx.rotate(Math.atan2(ly, lx) - PAINT_LIGHT);
+        ctx.drawImage(img, -k, -k, 2 * k, 2 * k); ctx.restore();
       } else {
-        sg.addColorStop(0, "#ffffff"); sg.addColorStop(0.25, hexA(col, 1)); sg.addColorStop(0.68, shade(col, 0.55)); sg.addColorStop(1, shade(col, 0.88));
+        const sg = ctx.createRadialGradient(x + lx * r * 0.45, y + ly * r * 0.45, r * 0.05, x + lx * r * 0.15, y + ly * r * 0.15, r * 1.15);
+        if (sn.look === "stalled") {
+          sg.addColorStop(0, "#f6c9ae"); sg.addColorStop(0.3, "#b45a35"); sg.addColorStop(0.75, "#5a2414"); sg.addColorStop(1, "#2a100a");
+        } else {
+          sg.addColorStop(0, mix(col, "#ffffff", 0.75)); sg.addColorStop(0.3, col); sg.addColorStop(0.75, shade(col, 0.45)); sg.addColorStop(1, shade(col, 0.7));
+        }
+        ctx.fillStyle = sg; ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.fill();
       }
-      if (!img) { ctx.fillStyle = sg; ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.fill(); }
+      const sx = x + lx * r * 0.5, sy = y + ly * r * 0.5, sh = ctx.createRadialGradient(sx, sy, 0, sx, sy, r * 1.7);
+      // The paintings carry their own light, so over one the night side is only a hint.
+      const night = img ? 0.4 : 1;
+      sh.addColorStop(0, "rgba(255,255,255,0.1)"); sh.addColorStop(0.45, "rgba(0,0,0,0)");
+      sh.addColorStop(0.8, `rgba(4,6,20,${0.35 * night})`); sh.addColorStop(1, `rgba(4,6,20,${0.6 * night})`);
+      ctx.fillStyle = sh; ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.fill();
       const ang = Math.atan2(ly, lx);
-      ctx.strokeStyle = hexA(lit, 0.75); ctx.lineWidth = Math.min(r * 0.25, this.px(1));
-      ctx.beginPath(); ctx.arc(x, y, r - ctx.lineWidth / 2, ang - 1.2, ang + 1.2); ctx.stroke();
+      ctx.strokeStyle = hexA(lit, 0.7); ctx.lineWidth = Math.min(r * 0.2, this.px(1.2));
+      ctx.beginPath(); ctx.arc(x, y, r - ctx.lineWidth / 2, ang - 1.3, ang + 1.3); ctx.stroke();
+      const hx = x + lx * r * 0.45, hy = y + ly * r * 0.45, hg = ctx.createRadialGradient(hx, hy, 0, hx, hy, r * 0.36);
+      hg.addColorStop(0, "rgba(255,255,255,0.6)"); hg.addColorStop(1, "rgba(255,255,255,0)");
+      ctx.fillStyle = hg; ctx.beginPath(); ctx.arc(hx, hy, r * 0.36, 0, TAU); ctx.fill();
     }
     // A live T3 thread on it: a dashed ring that turns, with a moon on it to click, which opens
     // the thread. Hovered, the moon grows.
@@ -1421,9 +1462,11 @@ export class Engine {
       if (len < A.r + B.r + 4) continue;
       const ax = A.x + ux * A.r, ay = A.y + uy * A.r, bx = B.x - ux * B.r, by = B.y - uy * B.r;
       const bow = Math.min(36, len * 0.1), cx = (ax + bx) / 2 - uy * bow, cy = (ay + by) / 2 + ux * bow;
-      ctx.strokeStyle = hexA(GOLD, toDest ? 0.06 : 0.12); ctx.lineWidth = this.px(6);
+      ctx.strokeStyle = hexA(GOLD, toDest ? 0.06 : 0.1); ctx.lineWidth = this.px(14);
       ctx.beginPath(); ctx.moveTo(ax, ay); ctx.quadraticCurveTo(cx, cy, bx, by); ctx.stroke();
-      ctx.strokeStyle = hexA(GOLD, toDest ? 0.55 : 0.9); ctx.lineWidth = this.px(toDest ? 1.3 : 1.7);
+      ctx.strokeStyle = hexA(GOLD, toDest ? 0.08 : 0.18); ctx.lineWidth = this.px(6);
+      ctx.beginPath(); ctx.moveTo(ax, ay); ctx.quadraticCurveTo(cx, cy, bx, by); ctx.stroke();
+      ctx.strokeStyle = hexA(GOLD, toDest ? 0.55 : 0.95); ctx.lineWidth = this.px(toDest ? 1.3 : 1.9);
       ctx.setLineDash(toDest ? [this.px(1.5), this.px(5)] : [this.px(7), this.px(5)]);
       ctx.lineDashOffset = -this.clock * this.px(6);
       ctx.beginPath(); ctx.moveTo(ax, ay); ctx.quadraticCurveTo(cx, cy, bx, by); ctx.stroke();
@@ -1439,19 +1482,28 @@ export class Engine {
       ctx.lineTo(t.x - vx * ah + vy * aw, t.y - vy * ah - vx * aw);
       ctx.closePath(); ctx.fillStyle = hexA(GOLD, toDest ? 0.6 : 0.95); ctx.fill();
     }
-    // A ring on each ticket the path runs through.
+    // A ring on each ticket the path runs through, and a bright bead where each leg joins.
     for (const p of pts.slice(1)) {
       if (p.kind !== "ticket") continue;
       ctx.strokeStyle = hexA(GOLD, 0.7); ctx.lineWidth = this.px(1.2);
       ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, TAU); ctx.stroke();
+    }
+    for (let i = 1; i < pts.length - 1; i++) {
+      const A = pts[i - 1], B = pts[i], dx = B.x - A.x, dy = B.y - A.y, len = Math.hypot(dx, dy) || 1;
+      const bx = B.x - (dx / len) * B.r, by = B.y - (dy / len) * B.r, br = this.px(3);
+      const g = ctx.createRadialGradient(bx, by, 0, bx, by, br * 3);
+      g.addColorStop(0, hexA(GOLD, 0.5)); g.addColorStop(1, hexA(GOLD, 0));
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(bx, by, br * 3, 0, TAU); ctx.fill();
+      ctx.fillStyle = "#fff6d8"; ctx.beginPath(); ctx.arc(bx, by, br * 0.7, 0, TAU); ctx.fill();
     }
     ctx.globalAlpha = this.mapAlpha;
   }
 
   // The destination: a bright violet-white star out past the rim, with long thin cross spikes,
   // finer diagonal rays and a few faint rings round it, like a navigation mark. It holds still;
-  // painted once into a sprite DEST_R world units in radius.
-  private paintDest() {
+  // painted once into a sprite DEST_R world units in radius: the rings, and with `light` the
+  // star itself, the stand-in while the painted one loads.
+  private paintDest(light: boolean) {
     const R = DEST_R, k = 3, c = document.createElement("canvas");
     c.width = c.height = Math.ceil(R * 2 * k);
     const ctx = c.getContext("2d")!;
@@ -1472,6 +1524,7 @@ export class Engine {
       const t = (i * TAU) / 4 + Math.PI / 4;
       ctx.beginPath(); ctx.moveTo(Math.cos(t) * 88, Math.sin(t) * 88); ctx.lineTo(Math.cos(t) * 96, Math.sin(t) * 96); ctx.stroke();
     }
+    if (!light) return c;
     ctx.globalCompositeOperation = "lighter";
     // The bloom.
     const bloom = ctx.createRadialGradient(0, 0, 0, 0, 0, 62);
@@ -1507,18 +1560,26 @@ export class Engine {
     const c = this.core;
     if (!c || this.mapNum == null) return;
     const hi = this.hover?.kind === "nursery" ? 1 : 0;
-    if (!this.drawTex("nursery", this.mapNum, palette("nursery", "frontier"), c.x, c.y, 115, 0.7 + 0.2 * hi, TAU)) this.drawCloud(this.nurserySprite(this.mapNum), c.x, c.y, 100, 0.85 + 0.15 * hi);
+    const n = { num: this.mapNum, status: "frontier" } as Node;
+    this.drawWash("nursery", n, palette("nursery", "frontier"), c.x, c.y, 105, 0.8 + 0.2 * hi, 0, 12);
   }
 
   private drawDest() {
     const d = this.dest;
     if (!d) return;
     const ctx = this.ctx, hi = this.hover?.kind === "dest" ? 1 : 0, R = DEST_R;
-    const sprite = (this.destSprite ??= this.paintDest());
+    const rings = (this.destSprite ??= this.paintDest(false));
     // While the goal is open it breathes, slowly; reached, it holds steady and bright.
     const breath = d.reached ? 1 : 0.86 + 0.08 * Math.sin(this.clock * 1.3);
     ctx.globalAlpha = this.mapAlpha * Math.min(1, breath + 0.12 * hi);
-    ctx.drawImage(sprite, d.x - R, d.y - R, R * 2, R * 2);
+    ctx.drawImage(rings, d.x - R, d.y - R, R * 2, R * 2);
+    // The star: the painted violet sparkle in the violet flame ring, screened so their light
+    // adds to the sky; the drawn star until they load.
+    ctx.globalCompositeOperation = "screen";
+    const lit = this.drawTex("corona", 0, null, d.x, d.y, 30 / CORONA_RING, 0.95, 0, 0, this.clock * 0.01, CORONA.violet)
+      && this.drawTex("star", 0, null, d.x, d.y, R, 1, 0, 0, 0, STAR.violet);
+    ctx.globalCompositeOperation = "source-over";
+    if (!lit) ctx.drawImage((this.destLight ??= this.paintDest(true)), d.x - R, d.y - R, R * 2, R * 2);
     if (hi) {
       ctx.strokeStyle = "rgba(210,190,255,0.45)"; ctx.lineWidth = this.px(1.2);
       ctx.beginPath(); ctx.arc(d.x, d.y, 44, 0, TAU); ctx.stroke();
@@ -1594,16 +1655,51 @@ export class Engine {
       { f: 0.15, n: 170, sz: 0.7, a: 0.45 },
       { f: 0.3, n: 90, sz: 1.1, a: 0.65 },
       { f: 0.5, n: 34, sz: 1.7, a: 0.9 },
+      { f: 0.42, n: 12, sz: 2.6, a: 1 },
     ].map((sp) => ({ f: sp.f, sz: sp.sz, a: sp.a, stars: Array.from({ length: sp.n }, () => ({ x: rnd(), y: rnd(), t: rnd() })) }));
   }
 
+  // The deep sky behind everything: broad violet and blue clouds over navy, painted once per
+  // canvas size, drifting very slightly against the camera so it reads as far away.
+  private drawSky(W: number, H: number) {
+    const ctx = this.ctx;
+    if (!this.sky || this.sky.width !== Math.ceil(W * 1.2) || this.sky.height !== Math.ceil(H * 1.2)) {
+      const c = document.createElement("canvas");
+      c.width = Math.ceil(W * 1.2); c.height = Math.ceil(H * 1.2);
+      const sc = c.getContext("2d")!;
+      sc.fillStyle = "#070b1a"; sc.fillRect(0, 0, c.width, c.height);
+      const puff = (fx: number, fy: number, rx: number, ry: number, col: string, al: number) => {
+        const g = sc.createRadialGradient(fx * c.width, fy * c.height, 0, fx * c.width, fy * c.height, rx * c.width);
+        g.addColorStop(0, hexA(col, al)); g.addColorStop(0.5, hexA(col, al * 0.4)); g.addColorStop(1, hexA(col, 0));
+        sc.save(); sc.translate(fx * c.width, fy * c.height); sc.scale(1, ry / rx); sc.translate(-fx * c.width, -fy * c.height);
+        sc.fillStyle = g; sc.beginPath(); sc.arc(fx * c.width, fy * c.height, rx * c.width, 0, TAU); sc.fill(); sc.restore();
+      };
+      puff(0.5, 0.5, 0.5, 0.45, "#16214a", 0.55);
+      puff(0.08, 0.84, 0.3, 0.26, "#7a46e0", 0.34);
+      puff(0.9, 0.14, 0.26, 0.24, "#9a46d2", 0.3);
+      puff(0.78, 0.92, 0.22, 0.2, "#5a3cc8", 0.24);
+      puff(0.28, 0.06, 0.22, 0.18, "#3c64d2", 0.2);
+      puff(0.14, 0.78, 0.1, 0.08, "#d060c0", 0.14);
+      puff(0.93, 0.2, 0.09, 0.08, "#f070a0", 0.12);
+      this.sky = c;
+    }
+    const f = 0.03, ox = -W * 0.1 + clamp(this.cam.x * f, -W * 0.1, W * 0.1), oy = -H * 0.1 + clamp(this.cam.y * f, -H * 0.1, H * 0.1);
+    ctx.drawImage(this.sky, ox, oy, W * 1.2, H * 1.2);
+  }
+
+  // Layers of twinkling stars in parallax; the largest few are soft and round, in a small halo.
   private drawStars(W: number, H: number) {
     const ctx = this.ctx;
     for (const L of this.stars) {
       ctx.fillStyle = "#fff";
       for (const s of L.stars) {
         ctx.globalAlpha = L.a * (0.65 + 0.35 * Math.sin(s.t * TAU + this.clock * 0.4 * s.t));
-        ctx.fillRect(mod(s.x * W + this.cam.x * L.f, W), mod(s.y * H + this.cam.y * L.f, H), L.sz, L.sz);
+        const x = mod(s.x * W + this.cam.x * L.f, W), y = mod(s.y * H + this.cam.y * L.f, H);
+        if (L.sz < 2) { ctx.fillRect(x, y, L.sz, L.sz); continue; }
+        const g = ctx.createRadialGradient(x, y, 0, x, y, L.sz * 3);
+        g.addColorStop(0, "rgba(255,255,255,0.9)"); g.addColorStop(0.3, "rgba(220,225,255,0.35)"); g.addColorStop(1, "rgba(200,210,255,0)");
+        ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, L.sz * 3, 0, TAU); ctx.fill();
+        ctx.fillStyle = "#fff";
       }
     }
     ctx.globalAlpha = 1;
@@ -1720,9 +1816,12 @@ export class Engine {
       // Concluded, it turns slowly where it drifted out to, each its own way.
       const settled = n.status === "resolved" || n.status === "out_of_scope";
       const drift = settled ? this.clock * 0.03 * (n.num % 2 ? 1 : -1) : 0;
-      if (!this.drawTex("nebula", n.num, palette("nebula", n.status, n.num), x, y, cr * (settled ? 5.5 : 4.2), (settled ? 0.75 : 0.9) + 0.25 * hi, TAU, 0.12, drift)) this.drawCloud(this.nebulaSprite(n), x, y, cr * 3.8, 0.9 + 0.1 * hi);
+      // Painted in its own colours, its status in the glow under it and in its sparks; ruled
+      // out, the same cloud in a dull grey.
+      const out = n.status === "out_of_scope";
+      this.drawWash(out ? "fog" : "nebula", n, out ? palette("nebula", n.status) : null, x, y, cr * (settled ? 7 : 6.5), (settled ? 0.85 : 1) + 0.2 * hi, drift, settled ? 6 : 8);
     } else if (n.body === "nursery") {
-      if (!this.drawTex("nursery", n.num, palette("nursery", n.status), x, y, cr * 3.8, 0.85 + 0.15 * hi, TAU)) this.drawCloud(this.nurserySprite(n.num), x, y, cr * 3.4, 0.85 + 0.15 * hi);
+      this.drawWash("nursery", n, palette("nursery", n.status), x, y, cr * 5.5, 0.95 + 0.1 * hi, 0, 8);
     }
     else if (n.body === "protostar") this.drawProtostar(n, x, y, cr);
     else this.drawSun(n, x, y, cr);
@@ -1806,7 +1905,11 @@ export class Engine {
     g.addColorStop(0.35, hexA(c.glow, (0.26 * pulse + 0.14 * hi + 0.08 * n.rel) * en));
     g.addColorStop(1, hexA(c.glow, 0));
     ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, gr, 0, TAU); ctx.fill();
-    const len = cr * (settled ? 1.9 : 3.4) * (1 + 0.25 * hi), w = cr * 0.3, al = settled ? 0.5 : 0.95;
+    const len = cr * (settled ? 2.2 : 4) * (1 + 0.25 * hi), w = cr * 0.24, al = settled ? 0.55 : 0.95;
+    // Painted: green on the frontier, white once resolved, and the white again in greyscale,
+    // coloured by status, for the rest. Its rays reach `len`, as the drawn ones do.
+    const kind: Kind = n.status === "frontier" ? "decision-green" : n.status === "resolved" ? "decision-white" : "decision-mono";
+    if (this.drawTex(kind, n.num, kind === "decision-mono" ? palette(kind, n.status) : null, x, y, len / STAR_TIP, settled ? 0.8 : 1, 0, 0, 0, Math.abs(n.num))) return;
     for (let i = 0; i < 4; i++) {
       ctx.save(); ctx.translate(x, y); ctx.rotate((i * Math.PI) / 2);
       const sg = ctx.createLinearGradient(0, 0, len, 0);
@@ -1822,12 +1925,12 @@ export class Engine {
     ctx.fillStyle = cg; ctx.beginPath(); ctx.arc(x, y, cr * 1.35, 0, TAU); ctx.fill();
   }
 
-  // A painted body, R world units in radius: which texture, its turn (within ±spin/2) and
-  // whether it's mirrored all follow from the seed, so a ticket always looks the same. False
-  // until the texture has loaded.
-  private drawTex(kind: Kind, seed: number, p: Palette, x: number, y: number, R: number, al: number, spin: number, squash = 0.12, drift = 0) {
+  // A painted body, R world units in radius: which texture (unless `pick` names one), its turn
+  // (within ±spin/2) and whether it's mirrored all follow from the seed, so a ticket always
+  // looks the same. False until the texture has loaded.
+  private drawTex(kind: Kind, seed: number, p: Palette | null, x: number, y: number, R: number, al: number, spin: number, squash = 0.12, drift = 0, pick?: number) {
     const rnd = mulberry32(seed * 2654435 + kind.length * 977);
-    const img = texture(kind, Math.floor(rnd() * 9973), p, 2 * R * this.ec.s * this.dpr);
+    const img = texture(kind, pick ?? Math.floor(rnd() * 9973), p, 2 * R * this.ec.s * this.dpr);
     if (!img) return false;
     const ctx = this.ctx, a = ctx.globalAlpha, turn = (rnd() - 0.5) * spin + drift, flip = rnd() < 0.5 ? -1 : 1;
     ctx.save(); ctx.translate(x, y); ctx.rotate(turn); ctx.scale(flip, 1 - squash * rnd());
@@ -1836,6 +1939,37 @@ export class Engine {
     ctx.restore();
     ctx.globalAlpha = a;
     return true;
+  }
+
+  // A cloud, alive: a glow under it, the painted texture in two layers turning slowly against
+  // each other (so its light shifts inside it), and sparks drifting through it, each on its own
+  // slow orbit, twinkling. The engine's own puffs stand in until the texture loads.
+  private drawWash(kind: "nebula" | "fog" | "nursery", n: Node, p: Palette | null, x: number, y: number, R: number, al: number, drift: number, sparks: number) {
+    const ctx = this.ctx, c = COL[n.status], t = this.clock, under = p ? p.stops[1] : c.glow;
+    const g = ctx.createRadialGradient(x, y, 0, x, y, R * 0.9);
+    g.addColorStop(0, hexA(under, 0.25 * al)); g.addColorStop(0.5, hexA(under, 0.1 * al)); g.addColorStop(1, hexA(under, 0));
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, R * 0.9, 0, TAU); ctx.fill();
+    const breathe = 1 + 0.04 * Math.sin(t * 0.7 + n.num);
+    // Both layers are the same painting at the same turn, the second swaying a little about
+    // it (turned further, a wide cloud would cross itself), so its light shifts inside it.
+    const pick = Math.abs(n.num);
+    if (!this.drawTex(kind, n.num, p, x, y, R * breathe, al, TAU, 0.12, drift, pick)) {
+      this.drawCloud(kind === "nursery" ? this.nurserySprite(n.num) : this.nebulaSprite(n), x, y, R * 0.8, al);
+      return;
+    }
+    ctx.globalCompositeOperation = "screen";
+    this.drawTex(kind, n.num, p, x, y, R * 0.92, al * (kind === "nursery" ? 0.25 : 0.35), TAU, 0.12, drift + 0.12 * Math.sin(t * 0.15 + n.num), pick);
+    ctx.globalCompositeOperation = "source-over";
+    const rnd = mulberry32(n.num * 131 + 17);
+    for (let i = 0; i < sparks; i++) {
+      const a0 = rnd() * TAU, d = (0.12 + rnd() * 0.42) * R, sp = (0.04 + rnd() * 0.08) * (rnd() < 0.5 ? 1 : -1), ph = rnd() * TAU;
+      const a = a0 + t * sp, sx = x + Math.cos(a) * d, sy = y + Math.sin(a) * d * 0.8;
+      const tw = 0.5 + 0.5 * Math.sin(t * (1.2 + rnd()) + ph), sr = this.px(1.4 + 1.6 * tw);
+      const sg = ctx.createRadialGradient(sx, sy, 0, sx, sy, sr * 3);
+      sg.addColorStop(0, hexA("#ffffff", 0.5 * tw)); sg.addColorStop(0.4, hexA(c.core, 0.22 * tw)); sg.addColorStop(1, hexA(c.core, 0));
+      ctx.fillStyle = sg; ctx.beginPath(); ctx.arc(sx, sy, sr * 3, 0, TAU); ctx.fill();
+      this.sparkle(sx, sy, sr, hexA("#ffffff", 0.6 + 0.4 * tw));
+    }
   }
 
   // A cloud sprite (a nebula or a nursery), drawn R world units in radius.
@@ -1908,18 +2042,24 @@ export class Engine {
   }
 
   // A prototype: a small bright core in an uneven, tilted accretion disk, thicker on one side.
+  // Painted, the open ones in their status's colour (green, blue, red), the settled ones in
+  // greyscale coloured by palette, each its own painting.
   private drawProtostar(n: Node, x: number, y: number, cr: number) {
     const ctx = this.ctx, c = COL[n.status], settled = n.status === "resolved" || n.status === "out_of_scope";
-    if (this.drawTex("protostar", n.num, palette("protostar", n.status), x, y, cr * 5, 1, 1.1, 0)) {
-      const cg = ctx.createRadialGradient(x, y, 0, x, y, cr * 0.9);
-      cg.addColorStop(0, "#ffffff"); cg.addColorStop(0.5, hexA(c.core, settled ? 0.6 : 0.95)); cg.addColorStop(1, hexA(c.glow, 0));
-      ctx.fillStyle = cg; ctx.beginPath(); ctx.arc(x, y, cr * 0.9, 0, TAU); ctx.fill();
-      return;
-    }
+    // A warm glow round it, then the painting, turned a little by ticket.
+    const hg = ctx.createRadialGradient(x, y, 0, x, y, cr * 4.5);
+    hg.addColorStop(0, hexA("#ffb070", settled ? 0.2 : 0.35)); hg.addColorStop(0.4, hexA(c.glow, 0.12)); hg.addColorStop(1, hexA(c.glow, 0));
+    ctx.fillStyle = hg; ctx.beginPath(); ctx.arc(x, y, cr * 4.5, 0, TAU); ctx.fill();
+    const turn = ((n.num % 5) - 2) * 0.08;
+    if (settled
+      ? this.drawTex("protostar-mono", n.num, palette("protostar", n.status), x, y, cr * 5.5, 0.8, 0, 0, turn, Math.abs(n.num))
+      : this.drawTex("protostar", n.num, null, x, y, cr * 5.5, 1, 0, 0, turn, PROTOSTAR[n.status as keyof typeof PROTOSTAR])) return;
+    // Until it loads: the disk drawn as tilted strokes round a glow.
+    const tilt = -0.42 + (n.num % 5) * 0.08;
     const g = ctx.createRadialGradient(x, y, 0, x, y, cr * 3.2);
     g.addColorStop(0, hexA(c.glow, settled ? 0.35 : 0.6)); g.addColorStop(1, hexA(c.glow, 0));
     ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, cr * 3.2, 0, TAU); ctx.fill();
-    const tilt = -0.42 + (n.num % 5) * 0.08, rx = cr * 2.5, ry = cr * 0.75;
+    const rx = cr * 2.5, ry = cr * 0.75;
     for (let i = 0; i < 3; i++) {
       ctx.strokeStyle = hexA(i === 1 ? "#ffd9a8" : c.core, (settled ? 0.3 : 0.55) * (1 - i * 0.25));
       ctx.lineWidth = cr * (0.5 - i * 0.12);
@@ -1942,8 +2082,9 @@ export class Engine {
     const gr = cr * (done ? 3.8 : 3.3), g = ctx.createRadialGradient(x, y, cr * 0.8, x, y, gr);
     g.addColorStop(0, hexA(glow, done ? 0.5 : 0.4)); g.addColorStop(0.4, hexA(glow, 0.14)); g.addColorStop(1, hexA(glow, 0));
     ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, gr, 0, TAU); ctx.fill();
-    // Painted, the corona texture is the whole sun, its own disc the photosphere.
-    if (this.drawTex("corona", n.num, palette("corona", n.status), x, y, cr * 2.6, done ? 1 : 0.9, TAU, 0)) return;
+    // Painted: a swirling disc in curling flames (the disc SUN_DISC of the image's half-width),
+    // small enough that the flames curl out inside its build ring.
+    if (this.drawTex("sun", n.num, null, x, y, (cr * 0.9) / SUN_DISC, done ? 1 : 0.9, TAU, 0)) return;
     const sg = ctx.createRadialGradient(x - cr * 0.2, y - cr * 0.2, 0, x, y, cr);
     sg.addColorStop(0, hot); sg.addColorStop(0.55, mid); sg.addColorStop(1, rim);
     ctx.fillStyle = sg; ctx.beginPath(); ctx.arc(x, y, cr, 0, TAU); ctx.fill();
@@ -1990,6 +2131,9 @@ export class Engine {
       const grow = (1 + 0.03 * Math.sin(this.clock * 0.5 + f.index)) * (1 + 0.1 * hi);
       ctx.globalAlpha = this.mapAlpha * Math.min(1, breathe + 0.35 * hi);
       ctx.drawImage(sprite, f.x - FOG_R * grow, f.y - FOG_R * grow, FOG_R * 2 * grow, FOG_R * 2 * grow);
+      // Over the haze, a painted violet cloud turning very slowly, with a few sparks in it.
+      const fn = { num: 5000 + f.index, status: "resolved" } as Node;
+      this.drawWash("fog", fn, FOG_PALETTE, f.x, f.y, FOG_R * 1.05 * grow, 0.55 + 0.25 * hi, this.clock * 0.015 * (f.index % 2 ? 1 : -1), 5);
       if (hi > 0.01) {
         // The hovered nebula's edge: a dotted ring around it.
         ctx.globalAlpha = this.mapAlpha * hi;
@@ -2243,6 +2387,7 @@ export class Engine {
     this.view = { x0: -this.ec.x / this.ec.s, y0: -this.ec.y / this.ec.s, x1: (W - this.ec.x) / this.ec.s, y1: (H - this.ec.y) / this.ec.s };
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     ctx.clearRect(0, 0, W, H);
+    this.drawSky(W, H);
     this.drawStars(W, H);
     ctx.save();
     ctx.globalAlpha = this.mapAlpha;

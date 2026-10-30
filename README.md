@@ -32,17 +32,28 @@ the map straight from GitHub and can act on it.
 - **Draws each ticket as a body.** Its form says its role and its colour its status. A decision
   is a star with four spikes, bright while open and subdued once resolved; research is a small
   nebula in its status's colour, and once concluded it drifts out past the rings into a belt of
-  its own, each one turning slowly in a colour of its own; a prototype is a protostar, a bright core in an accretion disk
-  with jets. While the spec is still forming there's a stellar nursery, dusty gas with bright
-  knots: a fold-in not yet completed is one, and a map with no fold-in at all has one at its
-  centre ("Spec forming"). The map's fold-in holds the centre, its rings stepping out round it.
-  A completed fold-in is a golden sun in a corona, clearly larger than
-  the planets that orbit it and lighting them from its side, with a thin ring that fills as
-  they're built. Nebulae, protostars, nurseries, coronas and planets are painted textures in
-  `web/public/bodies` (the clouds greyscale, coloured by status in the browser; the planets
-  discs, a world per look: green for ready, ochre for you, magma while blocked, cooled rust
-  once stalled, grey once built, and blue ice while being built); each ticket keeps the same
-  one, turned and mirrored its own way. The key lists the forms on the map.
+  its own, each one turning slowly in a colour of its own; a prototype is a protostar, a bright
+  core in an accretion disk with jets, green, blue or red by its status and pale once settled.
+  While the spec is still forming there's a stellar nursery, dusty gas with bright knots: a
+  fold-in not yet completed is one, and a map with no fold-in at all has one at its centre
+  ("Spec forming"). The map's fold-in holds the centre, its rings stepping out round it. A
+  completed fold-in is a warm golden sun in a wide soft glow, clearly larger than the glossy
+  planets that orbit it and lighting them from its side, with a thin ring that fills as they're
+  built, and a belt of rocks for the slices already built. The look is painted rather than
+  photographed, soft and saturated over a navy sky with violet haze, and alive: clouds turn in
+  two layers against each other with sparks drifting through them. The textures in
+  `web/public/bodies` give each body its own shape and grain. Most are cut from illustrated art
+  by `web/scripts/import-pack.py`, and keep their own paint: the decision stars (green on the
+  frontier, white once resolved), the research nebulae (eight paintings, one per ticket, its
+  status showing in the glow under it and in its sparks), the open protostars, the flame rings
+  round the Build hub and the destination, the destination's violet sparkle, the sun, the belt's
+  stones and the planets. A world per look: green for ready, desert gold for you, magma while
+  blocked, a grey moon once built, an ocean world while being built, and a cooled rust moon once
+  stalled. Each ticket keeps the same world, its lit side turned to face its sun. The rest are
+  greyscale, coloured by status in the browser: the nurseries, the decision stars claimed,
+  blocked or ruled out (the white ones again), the open questions' violet clouds and research
+  ruled out (the nebula paintings again) and the settled protostars (theirs again, one of six
+  per ticket). The key lists the forms on the map.
 - **Shows the build.** A ticket's sub-issues are its build slices (a fold-in's, usually), drawn
   as small planets orbiting it; a ticket on the map with a build label (`ready-for-agent`,
   `ready-for-human`, `size:*`) is a slice with no parent, and these orbit a "Build" hub beside
