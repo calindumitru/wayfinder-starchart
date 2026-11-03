@@ -75,9 +75,12 @@ export type BuildSlice = {
 };
 
 export type Progress = { done: number; total: number };
-// A map in the list: its decisions closed, and its build slices closed (on the map and its
-// tickets').
-export type MapSummary = { num: number; name: string; url: string; open: boolean; decisions: Progress; build: Progress };
+// A map in the list: its decisions closed, its build slices closed (on the map and its
+// tickets'), and its open checks by kind.
+export type MapSummary = {
+  num: number; name: string; url: string; open: boolean; decisions: Progress; build: Progress;
+  checks: { agent: number; owner: number };
+};
 
 export type Thread = { threadId: string; title: string; status: string; settled: boolean; ticket: number | null };
 

@@ -625,19 +625,37 @@ function MapList({
     </div>
   );
   const card = (m: MapSummary) => (
-    <div key={m.num} className={`card ${finished(m) ? "closed" : ""}`} onClick={() => onOpen(m.num)}>
+    <div key={m.num} className={`card ${finished(m) ? "closed" : checksLeft(m) ? "checksleft" : ""}`} onClick={() => onOpen(m.num)}>
       <div className="cname">{mapName(m.name)}</div>
       <div className="cmeta">
         <span>#{m.num}</span>
-        {!m.open && <span className="ctag">{finished(m) ? "Finished" : "Map closed · still building"}</span>}
+        {finished(m) ? <span className="ctag">Finished</span>
+          : checksLeft(m) ? <span className="ctag">Only checks left</span>
+          : !m.open && <span className="ctag">Map closed · still building</span>}
       </div>
       {bar("Decisions", m.decisions, "dec", "No tickets yet")}
       {bar("Building", m.build, "bld", "No slices yet")}
+      <div className="crow chk">
+        <span>Checks</span>
+        {m.checks.agent + m.checks.owner ? (
+          <span className="cchecks">
+            {m.checks.owner > 0 && <span className="owner">{m.checks.owner} owner</span>}
+            {m.checks.agent > 0 && <span className="agent">{m.checks.agent} agent</span>}
+          </span>
+        ) : (
+          <span className="cnone">None open</span>
+        )}
+      </div>
     </div>
   );
-  // A map is put away only once it's closed and every slice of it is closed too.
-  const finished = (m: MapSummary) => !m.open && m.build.done >= m.build.total;
-  const open = summaries?.filter((m) => !finished(m)) ?? [];
+  const built = (m: MapSummary) => m.decisions.done >= m.decisions.total && m.build.done >= m.build.total;
+  const checks = (m: MapSummary) => m.checks.agent + m.checks.owner;
+  // A map is put away only once it's closed, every slice of it is closed too, and no check on
+  // it is open. One with nothing left but its checks stays in view, after the rest.
+  const finished = (m: MapSummary) => !m.open && m.build.done >= m.build.total && !checks(m);
+  const checksLeft = (m: MapSummary) => built(m) && checks(m) > 0;
+  const active = summaries?.filter((m) => !finished(m)) ?? [];
+  const open = [...active.filter((m) => !checksLeft(m)), ...active.filter(checksLeft)];
   const closed = summaries?.filter(finished) ?? [];
   return (
     <div id="maplist">
