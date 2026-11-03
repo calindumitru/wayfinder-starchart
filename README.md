@@ -13,8 +13,10 @@ the map straight from GitHub and can act on it.
 ## What it does
 
 - **Lists a project's maps** with two bars each: decisions closed, and build slices closed (on
-  the map and its tickets'). A map is put away under "finished" only once it's closed *and* its
-  slices are all closed; a closed map that's still building stays in view.
+  the map and its tickets'), and its open owner and agent checks. A map is put away under
+  "finished" only once it's closed, its slices are all closed and none of its checks is open; a
+  closed map that's still building stays in view. A map with only checks left, open or closed,
+  goes after the rest.
 - **Reads maps from GitHub.** A map is an issue labelled `wayfinder:map`; its sub-issues are the
   tickets, typed by a `wayfinder:<type>` label and wired with GitHub's native issue dependencies.
   A couple of GraphQL queries (through `gh`, so starchart holds no token) return a map: its

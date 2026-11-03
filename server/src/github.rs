@@ -13,7 +13,7 @@ use crate::spec;
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Serialize;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tokio::process::Command;
 
 const MAP_QUERY: &str = r#"query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){issue(number:$number){
@@ -42,8 +42,9 @@ issues(first:100,labels:["wayfinder:map"],orderBy:{field:CREATED_AT,direction:DE
 number title url state subIssuesSummary{total completed}}}}}"#;
 
 /// A map's tickets, asked of each map that has any, as many as it has: whether each is closed,
-/// whether it's a slice (by its labels), and how many slices it has and has closed.
-const TICKETS: &str = "nodes{state labels(first:10){nodes{name}} subIssuesSummary{total completed}}";
+/// whether it's a slice (by its labels), and how many slices it has and has closed. Their
+/// numbers place the repo's open checks.
+const TICKETS: &str = "nodes{number state labels(first:10){nodes{name}} subIssuesSummary{total completed}}";
 
 #[derive(Serialize, Clone, Copy, Debug, Default, PartialEq)]
 pub struct Progress {
@@ -62,6 +63,14 @@ pub struct MapSummary {
     pub decisions: Progress,
     /// Its build slices, closed (built or dropped) of all: those on the map and its tickets'.
     pub build: Progress,
+    /// Its open checks, by kind.
+    pub checks: CheckCount,
+}
+
+#[derive(Serialize, Clone, Copy, Debug, Default, PartialEq)]
+pub struct CheckCount {
+    pub agent: u32,
+    pub owner: u32,
 }
 
 #[derive(Clone)]
@@ -169,10 +178,12 @@ impl GitHub {
         Ok(())
     }
 
-    /// The maps, newest first, with their progress. Their tickets are asked of each map for
-    /// as many as it has, so the cost follows the tickets there are; see the module notes.
+    /// The maps, newest first, with their progress and open checks. Their tickets are asked of
+    /// each map for as many as it has, so the cost follows the tickets there are; see the module
+    /// notes.
     pub async fn maps(&self, repo: &str) -> Result<Vec<MapSummary>> {
-        let v = self.graphql(LIST_QUERY, repo, None).await?;
+        let (v, mut checks) = tokio::try_join!(self.graphql(LIST_QUERY, repo, None), self.checks(repo))?;
+        self.parents(repo, &mut checks).await?;
         let mut list = parse_list(&v)?;
         let asks: String = nodes(&v["data"]["repository"], "issues")
             .filter_map(|i| {
@@ -194,6 +205,7 @@ impl GitHub {
         for m in &mut list {
             if let Some(map) = got.pointer(&format!("/data/repository/m{}", m.num)) {
                 (m.decisions, m.build) = progress(map);
+                m.checks = count_checks(m.num, map, &checks);
             }
         }
         Ok(list)
@@ -397,6 +409,7 @@ pub fn parse_list(v: &Value) -> Result<Vec<MapSummary>> {
             open: s(i, "state") == "OPEN",
             decisions: Progress::default(),
             build: Progress::default(),
+            checks: CheckCount::default(),
         })
         .collect())
 }
@@ -421,6 +434,25 @@ pub fn progress(map: &Value) -> (Progress, Progress) {
         }
     }
     (dec, build)
+}
+
+/// A map's open checks: those whose slice is on the map or a ticket's, as `model::build` counts.
+pub fn count_checks(number: u32, map: &Value, checks: &[Check]) -> CheckCount {
+    let on_map: HashSet<u32> = nodes(map, "subIssues")
+        .map(|t| num(t, "number"))
+        .chain([number])
+        .collect();
+    let mut count = CheckCount::default();
+    for c in checks
+        .iter()
+        .filter(|c| c.open && c.parent.is_some_and(|p| on_map.contains(&p)))
+    {
+        match c.kind.as_str() {
+            "owner" => count.owner += 1,
+            _ => count.agent += 1,
+        }
+    }
+    count
 }
 
 #[cfg(test)]
@@ -493,5 +525,30 @@ mod tests {
             progress(&map),
             (Progress { done: 2, total: 3 }, Progress { done: 2, total: 5 })
         );
+    }
+
+    #[test]
+    fn a_maps_open_checks_are_counted_by_kind() {
+        let map = json!({"subIssues": {"nodes": [{"number": 2}, {"number": 3}]}});
+        let check = |n: u32, kind: &str, open: bool, parent: u32| Check {
+            parent: Some(parent),
+            ..model::check(
+                n,
+                "Check",
+                "u",
+                open,
+                &[format!("check:{kind}")],
+                &format!("From slice #{}.", n + 100),
+            )
+            .unwrap()
+        };
+        let checks = [
+            check(50, "owner", true, 2),
+            check(51, "agent", true, 3),
+            check(52, "agent", true, 7),
+            check(53, "agent", false, 2),
+            check(54, "owner", true, 900),
+        ];
+        assert_eq!(count_checks(7, &map, &checks), CheckCount { agent: 2, owner: 1 });
     }
 }
